@@ -16,8 +16,13 @@
         devShells.default = mkShell rec {
           buildInputs = [
             # Rust
-            rust-bin.stable.latest.default
+            (rust-bin.selectLatestNightlyWith (toolchain:
+              toolchain.default.override {
+                targets = ["wasm32-unknown-unknown" "x86_64-unknown-linux-gnu"];
+                #extensions = [ "rustc-codegen-cranelift-preview" ];
+              }))
             trunk
+            lld_19
 
             # misc. libraries
             openssl

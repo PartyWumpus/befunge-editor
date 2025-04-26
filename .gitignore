@@ -9,5 +9,11 @@ target
 target_ra
 target_wasm
 
+.direnv
+
+perf.data
+perf.data.old
+flamegraph.svg
+
 # https://github.com/lycheeverse/lychee
 .lycheecache
