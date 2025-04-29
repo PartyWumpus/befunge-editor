@@ -30,17 +30,17 @@ log = "0.4.27"
 # You only need serde if you want app persistence:
 serde = { version = "1.0.219", features = ["derive"] }
 clipline = "0.3.0"
-instant = { version = "0.1.12", features = [ "wasm-bindgen"] }
+coarsetime = "0.1.36"
 #rand = "0.9.1"
 #rand_derive2 = "0.1.21"
 rfd = "0.15.3"
 futures = "0.3.31"
-circular-buffer = "1.1.0"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
 env_logger = "0.11.8"
+#gxhash = "3.5.0"
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -49,11 +49,13 @@ web-sys = "0.3.70"              # to access the DOM (to hide the loading text)
 
 [profile.release]
 opt-level = 2 # fast and small wasm
+#rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+aes,+sse2"]
 
 # Optimize all dependencies even in debug builds:
 [profile.dev.package."*"]
 opt-level = 2
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+#rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C", "target-feature=+aes,+sse2"]
+rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C"]
 strip = "debuginfo"
 
 

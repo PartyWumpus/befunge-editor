@@ -1,10 +1,9 @@
+use coarsetime::{Duration, Instant};
 use core::f32;
-use std::fs;
 use egui::StrokeKind;
-use instant::Instant;
+use std::fs;
 use std::future::Future;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
 
 use egui::{
     Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, ahash::HashMap,

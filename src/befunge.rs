@@ -1,9 +1,16 @@
-use circular_buffer::CircularBuffer;
 use clipline::AnyOctant;
 //use rand::{distr::StandardUniform, prelude::*};
-use egui::{ahash::HashMap, Color32};
-use instant::Instant;
-use std::collections::{VecDeque, hash_map::Iter};
+use coarsetime::{Duration, Instant};
+use egui::Color32;
+use std::collections::VecDeque;
+
+use egui::ahash::HashMap;
+/*
+#[cfg(target_arch = "wasm32")]
+use egui::ahash::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use gxhash::HashMap;
+*/
 
 pub enum Direction {
     North,
@@ -164,7 +171,13 @@ impl State {
 
     fn step_position(&mut self) {
         let (x, y) = self.position;
-        self.pos_history.insert((x, y), Instant::now());
+        if let Some(prev_time) = self.pos_history.get(&(x, y)) {
+            if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
+                self.pos_history.insert((x, y), Instant::recent());
+            }
+        } else {
+            self.pos_history.insert((x, y), Instant::recent());
+        }
         match self.direction {
             Direction::North => self.position = (x, y - 1),
             Direction::South => self.position = (x, y + 1),
@@ -178,6 +191,7 @@ impl State {
             return;
         }
 
+        self.step_inner();
         let mut safety_counter = 0;
         loop {
             safety_counter += 1;
@@ -187,7 +201,6 @@ impl State {
                 break;
             }
         }
-        self.step_inner();
     }
 
     fn step_inner(&mut self) {
