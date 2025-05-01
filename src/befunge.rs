@@ -57,7 +57,6 @@ pub struct State {
     pub stack: Vec<i64>,
     pub string_mode: bool,
     pub output: String,
-    halted: bool,
     pub graphics: Option<Graphics>,
 }
 
@@ -141,7 +140,6 @@ impl Default for State {
             pos_history: HashMap::default(),
             stack: Vec::new(),
             output: String::new(),
-            halted: false,
             graphics: None,
         }
     }
@@ -187,10 +185,6 @@ impl State {
     }
 
     pub fn step(&mut self) {
-        if self.halted {
-            return;
-        }
-
         self.step_inner();
         let mut safety_counter = 0;
         loop {
@@ -204,9 +198,6 @@ impl State {
     }
 
     fn step_inner(&mut self) {
-        if self.halted {
-            return;
-        }
         let op = self.map.get(self.position);
 
         if self.string_mode {
@@ -219,6 +210,9 @@ impl State {
         } else if let Some(op) = op
             && let Ok(op) = op.try_into()
         {
+            if op == b'@' {
+                return;
+            }
             self.do_op(op);
         }
         self.step_position();
@@ -328,10 +322,8 @@ impl State {
             // input
             b'&' | b'~' => {}
 
-            // halt
-            b'@' => {
-                self.halted = true;
-            }
+            // halt is dealt with higher up
+            b'@' => unreachable!(),
 
             // -- IO output
             b'.' => {}

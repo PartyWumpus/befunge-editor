@@ -55,7 +55,7 @@ opt-level = 2 # fast and small wasm
 [profile.dev.package."*"]
 opt-level = 2
 #rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C", "target-feature=+aes,+sse2"]
-rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C"]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 strip = "debuginfo"
 
 
