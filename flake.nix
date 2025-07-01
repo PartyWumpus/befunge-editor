@@ -16,11 +16,7 @@
         devShells.default = mkShell rec {
           buildInputs = [
             # Rust
-            (rust-bin.selectLatestNightlyWith (toolchain:
-              toolchain.default.override {
-                targets = ["wasm32-unknown-unknown" "x86_64-unknown-linux-gnu"];
-                #extensions = [ "rustc-codegen-cranelift-preview" ];
-              }))
+            (rust-bin.fromRustupToolchainFile ./rust-toolchain)
             trunk
             lld_19
 
