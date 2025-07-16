@@ -15,6 +15,7 @@ use egui::ahash::HashMap;
 use gxhash::HashMap;
 */
 
+#[derive(Clone)]
 pub enum Direction {
     North,
     South,
@@ -33,11 +34,13 @@ pub enum Direction {
     }
 }*/
 
+#[derive(Clone)]
 pub struct FungeSpace {
     map: HashMap<(i64, i64), i64>,
     zero_page: [i64; 100],
 }
 
+#[derive(Clone)]
 pub enum Event {
     Close,
     //KeyDown(i64),
@@ -45,6 +48,7 @@ pub enum Event {
     MouseClick(i64, i64),
 }
 
+#[derive(Clone)]
 pub struct Graphics {
     pub size: (usize, usize),
     pub texture: Vec<Color32>,
@@ -52,6 +56,7 @@ pub struct Graphics {
     pub event_queue: VecDeque<Event>,
 }
 
+#[derive(Clone)]
 pub struct State {
     pub map: FungeSpace,
     pub position: (i64, i64),
@@ -61,7 +66,6 @@ pub struct State {
     pub string_mode: bool,
     pub output: String,
     pub graphics: Option<Graphics>,
-    pub counter: u64,
     pub breakpoints: HashSet<(i64, i64)>,
     //pub input_buffer: VecDeque<i64>,
     pub input_buffer: String,
@@ -73,6 +77,16 @@ impl FungeSpace {
             map: HashMap::default(),
             zero_page: [b' '.into(); 100],
         }
+    }
+
+    pub fn new_from_string(input: String) -> Self {
+        let mut map = FungeSpace::new();
+        for (y, line) in input.lines().enumerate() {
+            for (x, char) in line.chars().enumerate() {
+                map.set((x.try_into().unwrap(), y.try_into().unwrap()), char as i64);
+            }
+        }
+        map
     }
 
     pub fn set(&mut self, pos: (i64, i64), val: i64) {
@@ -176,7 +190,6 @@ impl Default for State {
             stack: Vec::new(),
             output: String::new(),
             graphics: None,
-            counter: 0,
             breakpoints: HashSet::new(),
             //input_buffer: VecDeque::new(),
             input_buffer: String::new(),
@@ -193,15 +206,9 @@ impl State {
         Self::default()
     }
 
-    pub fn new_from_string(input: String) -> Self {
-        let mut map = FungeSpace::new();
-        for (y, line) in input.lines().enumerate() {
-            for (x, char) in line.chars().enumerate() {
-                map.set((x.try_into().unwrap(), y.try_into().unwrap()), char as i64);
-            }
-        }
+    pub fn new_from_fungespace(fungespace: FungeSpace) -> Self {
         Self {
-            map,
+            map: fungespace,
             ..Default::default()
         }
     }
@@ -229,9 +236,9 @@ impl State {
     }
 
     pub fn step(&mut self) -> bool {
-        self.step_inner();
+        let mut res = self.step_inner();
         if self.breakpoints.contains(&self.position) {
-            return true;
+            res = true;
         }
         // skip up to 100 spaces if not in string mode
         /*if !self.string_mode {
@@ -245,12 +252,11 @@ impl State {
                 }
             }
         };*/
-        false
+        res
     }
 
-    fn step_inner(&mut self) {
+    fn step_inner(&mut self) -> bool {
         let op = self.map.get(self.position);
-        self.counter += 1;
 
         if self.string_mode {
             let op = op.unwrap_or(b' ' as i64);
@@ -262,15 +268,15 @@ impl State {
         } else if let Some(op) = op
             && let Ok(op) = op.try_into()
         {
-            if op == b'@' {
-                return;
+            if self.do_op(op) {
+                return true;
             }
-            self.do_op(op);
         }
         self.step_position();
+        false
     }
 
-    fn do_op(&mut self, op: u8) {
+    fn do_op(&mut self, op: u8) -> bool {
         match op {
             b'"' => self.string_mode = true,
 
@@ -376,15 +382,20 @@ impl State {
                 todo!()
             }
 
-
             b'~' => {
-                // FIXME TODO oh my god
-                let ch = self.input_buffer.chars().next().unwrap();
-                self.stack.push(ch as i64);
+                // FIXME TODO oh my god use a vecdqueue i beg
+                let mut itr = self.input_buffer.chars();
+                match itr.next() {
+                    None => return true,
+                    Some(chr) => {
+                        self.stack.push(chr as i64);
+                        self.input_buffer = itr.as_str().into();
+                    }
+                }
             }
 
             // halt is dealt with higher up
-            b'@' => unreachable!(),
+            b'@' => return true,
 
             // -- IO output
             b'.' => {
@@ -476,7 +487,8 @@ impl State {
             b' ' => (),
 
             _ => panic!("invalid operation"),
-        }
+        };
+        false
     }
 }
 
