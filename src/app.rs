@@ -1,14 +1,13 @@
 use coarsetime::{Duration, Instant};
 use core::f32;
 use egui::StrokeKind;
-use std::fs;
 use std::future::Future;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2, vec2};
 
 use crate::BefungeState;
-use crate::befunge::Event;
+use crate::befunge::{Event, FungeSpace, get_color_of_bf_op};
 
 #[derive(Default)]
 enum Direction {
@@ -30,7 +29,11 @@ pub struct CursorState {
     string_mode: bool,
 }
 
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
+enum Mode {
+    Editing,
+    Playing,
+}
+
 pub struct App {
     texture: TextureHandle,
     text_channel: (Sender<String>, Receiver<String>),
@@ -38,7 +41,8 @@ pub struct App {
     paused: bool,
     follow: bool,
     speed: u8,
-
+    mode: Mode,
+    fungespace: FungeSpace,
     bf_state: BefungeState,
     cursor_state: CursorState,
     scene_rect: Rect,
@@ -92,6 +96,8 @@ impl App {
             cursor_state: CursorState::default(),
             paused: true,
             follow: false,
+            mode: Mode::Editing,
+            fungespace: FungeSpace::new(),
             speed: 1,
             bf_state: BefungeState::new(),
             texture: cc.egui_ctx.load_texture(
@@ -110,7 +116,11 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // For inspiration and more examples, go to https://emilk.github.io/egui
+        let dur = std::time::Duration::from_millis(5000);
+        if self.time_since_step.elapsed() > dur.into() {
+            ctx.request_repaint_after(dur);
+            self.time_since_step = Instant::now();
+        }
 
         if let Ok(text) = self.text_channel.1.try_recv() {
             self.bf_state = BefungeState::new_from_string(text);
@@ -162,14 +172,13 @@ impl eframe::App for App {
                 ui.checkbox(&mut self.follow, "follow");
             });
 
-            ui.add(egui::Slider::new(&mut self.speed, 1..=16).text("value"));
+            ui.add(egui::Slider::new(&mut self.speed, 1..=19).text("value"));
 
             egui::Frame::group(ui.style())
                 .inner_margin(0.0)
                 .show(ui, |ui| {
                     ui.set_min_height(100.0);
 
-                    self.befunge_input(ui);
                     self.befunge_scene(ui);
                 });
         });
@@ -204,28 +213,44 @@ impl App {
                 horizontal_arrows: true,
                 vertical_arrows: true,
             }) {
-                if let egui::Event::Text(text) | egui::Event::Paste(text) = event {
-                    for char in text.chars() {
-                        self.bf_state
-                            .map
-                            .set(self.cursor_state.location, char as i64);
+                match event {
+                    egui::Event::Text(text) => {
+                        for char in text.chars() {
+                            self.bf_state
+                                .map
+                                .set(self.cursor_state.location, char as i64);
 
-                        if char == '"' {
-                            self.cursor_state.string_mode = !self.cursor_state.string_mode;
-                        };
+                            if char == '"' {
+                                self.cursor_state.string_mode = !self.cursor_state.string_mode;
+                            };
 
-                        if !self.cursor_state.string_mode {
-                            match char {
-                                '>' => self.cursor_state.direction = Direction::East,
-                                'v' => self.cursor_state.direction = Direction::South,
-                                '<' => self.cursor_state.direction = Direction::West,
-                                '^' => self.cursor_state.direction = Direction::North,
-                                _ => (),
+                            if !self.cursor_state.string_mode {
+                                match char {
+                                    '>' => self.cursor_state.direction = Direction::East,
+                                    'v' => self.cursor_state.direction = Direction::South,
+                                    '<' => self.cursor_state.direction = Direction::West,
+                                    '^' => self.cursor_state.direction = Direction::North,
+                                    _ => (),
+                                }
                             }
-                        }
 
-                        self.step_cursor();
+                            self.step_cursor();
+                        }
                     }
+                    egui::Event::Paste(text) => {
+                        let (mut x, mut y) = self.cursor_state.location;
+                        for char in text.chars() {
+                            if char == '\n' {
+                                self.cursor_state.location;
+                                y += 1;
+                                x = self.cursor_state.location.0;
+                                continue;
+                            };
+                            self.bf_state.map.set((x, y), char as i64);
+                            x += 1
+                        }
+                    }
+                    _ => (),
                 }
             }
         });
@@ -234,6 +259,13 @@ impl App {
         let scene = Scene::new()
             .max_inner_size([450.0, 1000.0])
             .zoom_range(0.01..=5.0);
+
+        if self.follow {
+            self.scene_rect.set_center(poss((
+                self.bf_state.position.0 as f32 + 0.5,
+                self.bf_state.position.1 as f32 + 0.5,
+            )));
+        }
 
         let mut inner_rect = Rect::NAN;
         let response = scene
@@ -265,7 +297,7 @@ impl App {
                     for (pos, instant) in &self.bf_state.pos_history {
                         let rect = recter(*pos);
                         let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                        let mut mult = f32::log2(5.0 - time) - 1.322;
+                        let mut mult = f32::log2(5.0 - time) - 1.322 - 0.3;
                         if mult < 0.0 {
                             mult = 0.0
                         }
@@ -276,6 +308,18 @@ impl App {
                             Color32::PURPLE.gamma_multiply(mult),
                             Stroke::NONE,
                             StrokeKind::Outside,
+                        );
+                    }
+
+                    for pos in &self.bf_state.breakpoints {
+                        let rect = recter(*pos);
+
+                        painter.rect(
+                            rect,
+                            0.0,
+                            Color32::TRANSPARENT,
+                            Stroke::new(2.0, Color32::GREEN),
+                            StrokeKind::Inside,
                         );
                     }
                 }
@@ -303,10 +347,18 @@ impl App {
                                     .response
                             })
                         } else {
-                            ui.put(
-                                pos,
-                                egui::Label::new(String::from(val as char)).selectable(false),
-                            )
+                            if let Some(color) = get_color_of_bf_op(val) {
+                                ui.put(
+                                    pos,
+                                    egui::Label::new(egui::RichText::new(val as char).color(color))
+                                        .selectable(false),
+                                )
+                            } else {
+                                ui.put(
+                                    pos,
+                                    egui::Label::new(String::from(val as char)).selectable(false),
+                                )
+                            }
                         }
                     } else {
                         ui.put(pos, |ui: &mut Ui| {
@@ -323,22 +375,26 @@ impl App {
             })
             .response;
 
-        if response.clicked() && let Some(pos) = response.interact_pointer_pos() {
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
             if pos.x > 0.0 && pos.y > 0.0 {
                 self.cursor_state.location = poss_reverse(pos);
             }
         };
 
-        if response.double_clicked() && !self.follow {
-            self.scene_rect = inner_rect;
-        }
-
-        if self.follow {
-            self.scene_rect.set_center(poss((
-                self.bf_state.position.0 as f32 + 0.5,
-                self.bf_state.position.1 as f32 + 0.5,
-            )));
-        }
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            if pos.x > 0.0 && pos.y > 0.0 {
+                let pos = poss_reverse(pos);
+                if self.bf_state.breakpoints.contains(&pos) {
+                    self.bf_state.breakpoints.remove(&pos)
+                } else {
+                    self.bf_state.breakpoints.insert(pos)
+                };
+            }
+        };
     }
 
     fn step_cursor(&mut self) {
@@ -373,37 +429,61 @@ impl App {
         }
     }
 
+    fn step_bf(&mut self) -> bool {
+        let breakpoint_reached = self.bf_state.step();
+        if breakpoint_reached {
+            self.paused = true;
+        };
+        breakpoint_reached
+    }
+
     fn step_befunge(&mut self, ctx: &egui::Context) {
         let elapsed = self.time_since_step.elapsed();
         let time_per_step = match self.speed {
+            0 => unreachable!(),
             1 => Duration::from_millis((1000.0 / 1.0) as u64),
             2 => Duration::from_millis((1000.0 / 2.0) as u64),
             3 => Duration::from_millis((1000.0 / 4.0) as u64),
             4 => Duration::from_millis((1000.0 / 8.0) as u64),
             5 => Duration::from_millis((1000.0 / 16.0) as u64),
-            5..=10 => Duration::from_millis((1000.0 / 32.0) as u64),
-            _ => Duration::from_millis((1000.0 / 64.0) as u64),
+            _ => Duration::from_millis((1000.0 / 32.0) as u64),
         };
         if elapsed >= time_per_step {
             match self.speed {
-                ..6 => self.bf_state.step(),
-                6..=12 => {
-                    for _ in 0..=self.speed {
-                        self.bf_state.step();
+                ..6 => {
+                    self.step_bf();
+                }
+                6..=9 => {
+                    for _ in 0..=self.speed - 6 {
+                        if self.step_bf() {
+                            return;
+                        };
                     }
                 }
-                13..=15 => {
+                10..=15 => {
                     for _ in 0..=2_usize.pow(self.speed as u32 - 8) {
-                        self.bf_state.step();
+                        if self.step_bf() {
+                            return;
+                        };
                     }
                 }
-                16 => {
+                16..=19 => {
                     let now = Instant::now();
                     loop {
                         for _ in 0..=10000 {
-                            self.bf_state.step();
+                            if self.step_bf() {
+                                return;
+                            }
                         }
-                        if now.elapsed() > Duration::from_millis(30) {
+                        if now.elapsed()
+                            > Duration::from_millis(match self.speed - 16 {
+                                0 => 4,
+                                1 => 8,
+                                2 => 16,
+                                3 => 32,
+                                _ => unreachable!(),
+                            })
+                        {
                             break;
                         }
                     }
@@ -533,10 +613,33 @@ impl App {
             });
         }
 
+        ui.label(self.bf_state.counter.to_string());
         ui.label("Stack:");
-        for value in &self.bf_state.stack {
-            ui.label(value.to_string());
-        }
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .show(ui, |ui| {
+                for value in &self.bf_state.stack {
+                    ui.label(value.to_string());
+                }
+            });
+
+        let mut textbox_focused = false;
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.add_space(2.0);
+            let resp = ui.text_edit_singleline(&mut self.bf_state.input_buffer);
+            ui.label("Input:");
+
+            ui.add_space(2.0);
+            ui.label(&self.bf_state.output);
+            ui.label("Output:");
+
+            textbox_focused = resp.has_focus();
+        });
+
+
+        if !textbox_focused {
+        self.befunge_input(ui);
+        };
     }
 }
 

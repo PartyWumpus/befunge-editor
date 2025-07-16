@@ -1,8 +1,11 @@
 use clipline::AnyOctant;
 //use rand::{distr::StandardUniform, prelude::*};
 use coarsetime::{Duration, Instant};
-use egui::Color32;
-use std::collections::VecDeque;
+use egui::{
+    Color32,
+    ahash::{HashSet, HashSetExt},
+};
+use std::{collections::VecDeque, iter};
 
 use egui::ahash::HashMap;
 /*
@@ -58,6 +61,10 @@ pub struct State {
     pub string_mode: bool,
     pub output: String,
     pub graphics: Option<Graphics>,
+    pub counter: u64,
+    pub breakpoints: HashSet<(i64, i64)>,
+    //pub input_buffer: VecDeque<i64>,
+    pub input_buffer: String,
 }
 
 impl FungeSpace {
@@ -81,7 +88,7 @@ impl FungeSpace {
 
     pub fn get(&mut self, pos: (i64, i64)) -> Option<i64> {
         if pos.0 < 10 && pos.1 < 10 {
-            Some(self.zero_page[(pos.0 + pos.1 * 10) as usize])
+            Some(self.zero_page[usize::try_from(pos.0 + pos.1 * 10).unwrap()])
         } else {
             self.map.get(&pos).copied()
         }
@@ -108,8 +115,36 @@ impl FungeSpace {
             }))
     }
 
+    fn height(&mut self) -> usize {
+        let mut height = 10;
+        for ((_x, y), _val) in &self.map {
+            if *y > height {
+                height = *y
+            }
+        }
+        height as usize + 1
+    }
+
     pub fn serialize(&mut self) -> String {
-        todo!()
+        let height = self.height();
+        let mut lines: Vec<Vec<char>> = vec![vec![]; height];
+        for ((x, y), val) in self.entries() {
+            let line = &mut lines[y as usize];
+            if line.len() <= x as usize {
+                line.extend(iter::repeat_n(' ', x as usize - line.len()));
+                assert_ne!(val, b'\n' as i64);
+                assert_ne!(val, b'\r' as i64);
+                line.push(char::from_u32(val as u32).expect("wawa"));
+            } else {
+                line[x as usize] = char::from_u32(val as u32).expect("wawa");
+            };
+        }
+        let mut out = String::new();
+        for line in lines {
+            out += &line.iter().collect::<String>();
+            out += "\n";
+        }
+        out
     }
 }
 
@@ -141,6 +176,10 @@ impl Default for State {
             stack: Vec::new(),
             output: String::new(),
             graphics: None,
+            counter: 0,
+            breakpoints: HashSet::new(),
+            //input_buffer: VecDeque::new(),
+            input_buffer: String::new(),
         }
     }
 }
@@ -168,6 +207,7 @@ impl State {
     }
 
     fn step_position(&mut self) {
+        self.step_position_inner();
         let (x, y) = self.position;
         if let Some(prev_time) = self.pos_history.get(&(x, y)) {
             if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
@@ -176,6 +216,10 @@ impl State {
         } else {
             self.pos_history.insert((x, y), Instant::recent());
         }
+    }
+
+    fn step_position_inner(&mut self) {
+        let (x, y) = self.position;
         match self.direction {
             Direction::North => self.position = (x, y - 1),
             Direction::South => self.position = (x, y + 1),
@@ -184,21 +228,29 @@ impl State {
         }
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> bool {
         self.step_inner();
-        let mut safety_counter = 0;
-        loop {
-            safety_counter += 1;
-            if safety_counter < 100 && self.map.get_wrapped(self.position) == b' ' as i64 {
-                self.step_position();
-            } else {
-                break;
-            }
+        if self.breakpoints.contains(&self.position) {
+            return true;
         }
+        // skip up to 100 spaces if not in string mode
+        /*if !self.string_mode {
+            let mut safety_counter = 0;
+            loop {
+                safety_counter += 1;
+                if safety_counter < 100 && self.map.get_wrapped(self.position) == b' ' as i64 {
+                    self.step_position();
+                } else {
+                    break;
+                }
+            }
+        };*/
+        false
     }
 
     fn step_inner(&mut self) {
         let op = self.map.get(self.position);
+        self.counter += 1;
 
         if self.string_mode {
             let op = op.unwrap_or(b' ' as i64);
@@ -281,7 +333,7 @@ impl State {
             b'<' => self.direction = Direction::West,
             b'^' => self.direction = Direction::North,
             b'v' => self.direction = Direction::South,
-            b'#' => self.step_position(), // skip forwards one
+            b'#' => self.step_position_inner(), // skip forwards one
 
             // dynamic direction changes
             //b'?' => self.direction = (rand::rng()).random(),
@@ -320,14 +372,29 @@ impl State {
             }
 
             // input
-            b'&' | b'~' => {}
+            b'&' => {
+                todo!()
+            }
+
+
+            b'~' => {
+                // FIXME TODO oh my god
+                let ch = self.input_buffer.chars().next().unwrap();
+                self.stack.push(ch as i64);
+            }
 
             // halt is dealt with higher up
             b'@' => unreachable!(),
 
             // -- IO output
-            b'.' => {}
-            b',' => {}
+            b'.' => {
+                let a = self.pop().to_string();
+                self.output.push_str(&a);
+            }
+            b',' => {
+                let a = (self.pop() as u32).try_into().unwrap();
+                self.output.push(a);
+            }
 
             // befunge with graphics
             b's' => {
@@ -410,5 +477,47 @@ impl State {
 
             _ => panic!("invalid operation"),
         }
+    }
+}
+
+enum OpTypes {
+    Number,
+    Operator,
+    Direction,
+    Modification,
+    IO,
+    Graphics,
+    None,
+}
+
+pub fn get_color_of_bf_op(op: u8) -> Option<Color32> {
+    // TODO: replace with graph traversal maybe
+    let flavor = match op {
+        b'0'..=b'9' => OpTypes::Number,
+        b'+' | b'-' | b'*' | b'/' | b'%' | b'`' | b'"' | b'\\' | b'!' | b':' | b'$' => {
+            OpTypes::Operator
+        }
+
+        b'>' | b'<' | b'^' | b'v' | b'#' | b'?' | b'_' | b'|' => OpTypes::Direction,
+
+        b'p' | b'g' => OpTypes::Modification,
+
+        b'&' | b'~' | b'.' | b',' => OpTypes::IO,
+
+        b's' | b'f' | b'x' | b'c' | b'u' | b'l' | b'z' => OpTypes::Graphics,
+        b'@' => OpTypes::None,
+
+        // noop
+        _ => OpTypes::None,
+    };
+
+    match flavor {
+        OpTypes::Number => Some(Color32::from_rgb(32, 159, 181)),
+        OpTypes::Operator => Some(Color32::from_rgb(210, 15, 57)),
+        OpTypes::Direction => Some(Color32::from_rgb(64, 160, 43)),
+        OpTypes::Modification => Some(Color32::from_rgb(136, 57, 239)),
+        OpTypes::IO => Some(Color32::from_rgb(234, 118, 203)),
+        OpTypes::Graphics => Some(Color32::from_rgb(114, 135, 253)),
+        OpTypes::None => None,
     }
 }
