@@ -37,7 +37,7 @@ pub enum Direction {
 #[derive(Clone)]
 pub struct FungeSpace {
     map: HashMap<(i64, i64), i64>,
-    zero_page: [i64; 100],
+    zero_page: Box<[i64; 100]>,
 }
 
 #[derive(Clone)]
@@ -71,11 +71,17 @@ pub struct State {
     pub input_buffer: String,
 }
 
+impl Default for FungeSpace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FungeSpace {
     pub fn new() -> Self {
         Self {
             map: HashMap::default(),
-            zero_page: [b' '.into(); 100],
+            zero_page: Box::new([b' '.into(); 100]),
         }
     }
 
@@ -131,7 +137,7 @@ impl FungeSpace {
 
     fn height(&mut self) -> usize {
         let mut height = 10;
-        for ((_x, y), _val) in &self.map {
+        for (_x, y) in self.map.keys() {
             if *y > height {
                 height = *y
             }
@@ -267,11 +273,9 @@ impl State {
             }
         } else if let Some(op) = op
             && let Ok(op) = op.try_into()
-        {
-            if self.do_op(op) {
+            && self.do_op(op) {
                 return true;
             }
-        }
         self.step_position();
         false
     }

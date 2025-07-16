@@ -4,10 +4,18 @@ use egui::StrokeKind;
 use std::future::Future;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2, vec2};
+use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
 use crate::BefungeState;
-use crate::befunge::{Event, FungeSpace, get_color_of_bf_op};
+use crate::befunge::{Event, FungeSpace, Graphics, get_color_of_bf_op};
+
+fn round_down(n: i64, m: i64) -> i64 {
+    if n >= 0 {
+        (n / m) * m
+    } else {
+        ((n - m + 1) / m) * m
+    }
+}
 
 #[derive(Default, Clone)]
 enum Direction {
@@ -38,8 +46,8 @@ enum Mode {
     Playing {
         snapshot: FungeSpace,
         time_since_step: Instant,
-        bf_state: BefungeState,
-        paused: bool,
+        bf_state: Box<BefungeState>,
+        running: bool,
         follow: bool,
         speed: u8,
     },
@@ -104,8 +112,8 @@ impl Mode {
             Mode::Editing { fungespace, .. } => Mode::Playing {
                 snapshot: fungespace.clone(),
                 time_since_step: Instant::now(),
-                bf_state: BefungeState::new_from_fungespace(fungespace),
-                paused: true,
+                bf_state: Box::new(BefungeState::new_from_fungespace(fungespace)),
+                running: false,
                 follow: false,
                 speed: 5,
             },
@@ -116,10 +124,10 @@ impl Mode {
         };
     }
 
-    fn step_befunge_inner(bf_state: &mut BefungeState, paused: &mut bool) -> bool {
+    fn step_befunge_inner(bf_state: &mut BefungeState, running: &mut bool) -> bool {
         let breakpoint_reached = bf_state.step();
         if breakpoint_reached {
-            *paused = true;
+            *running = false;
         };
         breakpoint_reached
     }
@@ -131,7 +139,7 @@ impl Mode {
                 time_since_step,
                 speed,
                 bf_state,
-                paused,
+                running,
                 ..
             } => {
                 let elapsed = time_since_step.elapsed();
@@ -147,18 +155,18 @@ impl Mode {
                 if elapsed >= time_per_step {
                     match speed {
                         ..6 => {
-                            Self::step_befunge_inner(bf_state, paused);
+                            Self::step_befunge_inner(bf_state, running);
                         }
                         6..=9 => {
                             for _ in 0..=*speed - 6 {
-                                if Self::step_befunge_inner(bf_state, paused) {
+                                if Self::step_befunge_inner(bf_state, running) {
                                     return;
                                 };
                             }
                         }
                         10..=15 => {
                             for _ in 0..=2_usize.pow(*speed as u32 - 8) {
-                                if Self::step_befunge_inner(bf_state, paused) {
+                                if Self::step_befunge_inner(bf_state, running) {
                                     return;
                                 };
                             }
@@ -167,7 +175,7 @@ impl Mode {
                             let now = Instant::now();
                             loop {
                                 for _ in 0..=10000 {
-                                    if Self::step_befunge_inner(bf_state, paused) {
+                                    if Self::step_befunge_inner(bf_state, running) {
                                         return;
                                     }
                                 }
@@ -251,7 +259,7 @@ impl eframe::App for App {
         let dur = std::time::Duration::from_millis(5000);
         if let Mode::Playing {
             ref mut time_since_step,
-            paused,
+            running,
             ..
         } = self.mode
         {
@@ -260,7 +268,7 @@ impl eframe::App for App {
                 *time_since_step = Instant::now();
             }
 
-            if !paused {
+            if running {
                 self.mode.step_befunge(ctx);
             }
         }
@@ -312,7 +320,7 @@ impl eframe::App for App {
 
             if let Mode::Playing {
                 bf_state,
-                paused,
+                running,
                 follow,
                 speed,
                 ..
@@ -322,7 +330,7 @@ impl eframe::App for App {
                     if ui.button("step").clicked() {
                         bf_state.step();
                     }
-                    ui.checkbox(paused, "paused");
+                    ui.checkbox(running, "play");
                     ui.checkbox(follow, "follow");
                 });
 
@@ -400,7 +408,6 @@ impl App {
                             let (mut x, mut y) = cursor_state.location;
                             for char in text.chars() {
                                 if char == '\n' {
-                                    cursor_state.location;
                                     y += 1;
                                     x = cursor_state.location.0;
                                     continue;
@@ -418,7 +425,7 @@ impl App {
 
     fn befunge_scene(&mut self, ui: &mut egui::Ui) {
         let scene = Scene::new()
-            .max_inner_size([450.0, 1000.0])
+            .max_inner_size([f32::INFINITY, f32::INFINITY])
             .zoom_range(0.01..=5.0);
 
         if let Mode::Playing {
@@ -433,9 +440,49 @@ impl App {
             )));
         }
 
-        let mut inner_rect = Rect::NAN;
+        let scene_rect = self.scene_rect;
         let response = scene
             .show(ui, &mut self.scene_rect, |ui| {
+                let painter = ui.painter();
+
+                // JANK GRID PATTERN
+                /*
+                let mut i = -0.5;
+                let left = f32::max(scene_rect.left(), -0.5);
+                loop {
+                    painter.line_segment(
+                        [
+                            Pos2::new(left, i),
+                            Pos2::new(scene_rect.right(), i),
+                        ],
+                        Stroke::new(1.0, Color32::from_gray(50)),
+                    );
+                    i += 17.0;
+                    if i > scene_rect.bottom() {
+                        break;
+                    };
+                };
+
+                let mut i = -0.5;
+                let top = f32::max(scene_rect.top(), -0.5);
+                loop {
+                painter.line_segment(
+                    [
+                        Pos2::new(i, top),
+                        Pos2::new(i, scene_rect.bottom()),
+                    ],
+                    Stroke::new(1.0, Color32::from_gray(50)),
+                );
+                    i += 13.0;
+                    if i > scene_rect.right() {
+                        break;
+                    };
+                };
+                */
+
+                // TODO: consider doing lil dots instead of grid
+                // so it looks less bad
+
                 match &mut self.mode {
                     Mode::Playing { bf_state, .. } => {
                         // TODO: move this somewhere more sensible
@@ -443,7 +490,6 @@ impl App {
                             .pos_history
                             .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
-                        let painter = ui.painter();
                         painter.rect(
                             recter(bf_state.position),
                             0.0,
@@ -481,7 +527,6 @@ impl App {
                         }
                     }
                     Mode::Editing { cursor_state, .. } => {
-                        let painter = ui.painter();
                         painter.rect(
                             recter(cursor_state.location),
                             0.0,
@@ -522,19 +567,17 @@ impl App {
                                     })
                                     .response
                             })
+                        } else if let Some(color) = get_color_of_bf_op(val) {
+                            ui.put(
+                                pos,
+                                egui::Label::new(egui::RichText::new(val as char).color(color))
+                                    .selectable(false),
+                            )
                         } else {
-                            if let Some(color) = get_color_of_bf_op(val) {
-                                ui.put(
-                                    pos,
-                                    egui::Label::new(egui::RichText::new(val as char).color(color))
-                                        .selectable(false),
-                                )
-                            } else {
-                                ui.put(
-                                    pos,
-                                    egui::Label::new(String::from(val as char)).selectable(false),
-                                )
-                            }
+                            ui.put(
+                                pos,
+                                egui::Label::new(String::from(val as char)).selectable(false),
+                            )
                         }
                     } else {
                         ui.put(pos, |ui: &mut Ui| {
@@ -546,8 +589,6 @@ impl App {
                     }
                     .on_hover_text(val.to_string());
                 }
-
-                inner_rect = ui.min_rect();
             })
             .response;
 
@@ -611,14 +652,8 @@ impl App {
                 if ui.button("💾 Save text to file").clicked() {
                     let task = rfd::AsyncFileDialog::new().save_file();
                     let contents = match &mut self.mode {
-                        Mode::Playing {
-                            bf_state:
-                                BefungeState {
-                                    map: fungespace, ..
-                                },
-                            ..
-                        }
-                        | Mode::Editing { fungespace, .. } => fungespace.serialize(),
+                        Mode::Playing { bf_state, .. } => bf_state.map.serialize(),
+                        Mode::Editing { fungespace, .. } => fungespace.serialize(),
                     };
 
                     execute(async move {
@@ -657,66 +692,58 @@ impl App {
     }
 
     fn info_panel(&mut self, ui: &mut egui::Ui) {
-        if let Mode::Playing {
-            bf_state:
-                BefungeState {
-                    graphics: Some(graphics),
-                    ..
-                },
-            ..
-        } = &mut self.mode
-        {
-            ui.label("Graphics:");
-            self.texture.set(
-                egui::ColorImage {
-                    size: [graphics.size.0, graphics.size.1],
-                    pixels: graphics.texture.clone(),
-                },
-                egui::TextureOptions::NEAREST,
-            );
-
-            let size = self.texture.size_vec2() * 2.0;
-            let sized_texture = egui::load::SizedTexture::new(&self.texture, size);
-            let canvas = ui.add(egui::Image::new(sized_texture).fit_to_exact_size(size));
-            let canvas = canvas.interact(Sense::click());
-            if canvas.clicked()
-                && let Some(pos) = canvas.interact_pointer_pos()
-            {
-                let container = canvas.interact_rect;
-                let pos = pos.clamp(container.min, container.max);
-                let pos = pos2(
-                    (pos.x - container.left()) / container.width(),
-                    (pos.y - container.top()) / container.height(),
-                );
-                let pixel_pos = (
-                    ((graphics.size.0 - 1) as f32 * pos.x).round() as i64,
-                    ((graphics.size.1 - 1) as f32 * pos.y).round() as i64,
-                );
-                graphics
-                    .event_queue
-                    .push_back(Event::MouseClick(pixel_pos.0, pixel_pos.1));
-            }
-            ui.horizontal(|ui| {
-                ui.label("Color:");
-                let size = Vec2::splat(16.0);
-                let (response, painter) = ui.allocate_painter(size, Sense::hover());
-                let color = graphics.current_color;
-                let response = response.on_hover_text(format!(
-                    "#{:02X}{:02X}{:02X}",
-                    color.r(),
-                    color.g(),
-                    color.b()
-                ));
-                let rect = response.rect;
-                let c = rect.center();
-                let r = rect.width() / 2.0 - 1.0;
-                let color = Color32::from_gray(128);
-                let stroke = Stroke::new(1.0, color);
-                painter.circle(c, r, graphics.current_color, stroke);
-            });
-        }
-
         if let Mode::Playing { bf_state, .. } = &mut self.mode {
+            if let Some(graphics) = &mut bf_state.graphics {
+                ui.label("Graphics:");
+                self.texture.set(
+                    egui::ColorImage {
+                        size: [graphics.size.0, graphics.size.1],
+                        pixels: graphics.texture.clone(),
+                    },
+                    egui::TextureOptions::NEAREST,
+                );
+
+                let size = self.texture.size_vec2() * 2.0;
+                let sized_texture = egui::load::SizedTexture::new(&self.texture, size);
+                let canvas = ui.add(egui::Image::new(sized_texture).fit_to_exact_size(size));
+                let canvas = canvas.interact(Sense::click());
+                if canvas.clicked()
+                    && let Some(pos) = canvas.interact_pointer_pos()
+                {
+                    let container = canvas.interact_rect;
+                    let pos = pos.clamp(container.min, container.max);
+                    let pos = pos2(
+                        (pos.x - container.left()) / container.width(),
+                        (pos.y - container.top()) / container.height(),
+                    );
+                    let pixel_pos = (
+                        ((graphics.size.0 - 1) as f32 * pos.x).round() as i64,
+                        ((graphics.size.1 - 1) as f32 * pos.y).round() as i64,
+                    );
+                    graphics
+                        .event_queue
+                        .push_back(Event::MouseClick(pixel_pos.0, pixel_pos.1));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Color:");
+                    let size = Vec2::splat(16.0);
+                    let (response, painter) = ui.allocate_painter(size, Sense::hover());
+                    let color = graphics.current_color;
+                    let response = response.on_hover_text(format!(
+                        "#{:02X}{:02X}{:02X}",
+                        color.r(),
+                        color.g(),
+                        color.b()
+                    ));
+                    let rect = response.rect;
+                    let c = rect.center();
+                    let r = rect.width() / 2.0 - 1.0;
+                    let color = Color32::from_gray(128);
+                    let stroke = Stroke::new(1.0, color);
+                    painter.circle(c, r, graphics.current_color, stroke);
+                });
+            }
+
             ui.label("Stack:");
             egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
