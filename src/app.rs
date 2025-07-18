@@ -8,15 +8,6 @@ use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, 
 
 use crate::BefungeState;
 use crate::befunge::{Event, FungeSpace, Graphics, get_color_of_bf_op};
-
-fn round_down(n: i64, m: i64) -> i64 {
-    if n >= 0 {
-        (n / m) * m
-    } else {
-        ((n - m + 1) / m) * m
-    }
-}
-
 #[derive(Default, Clone)]
 enum Direction {
     North,
@@ -25,10 +16,6 @@ enum Direction {
     East,
     West,
 }
-
-#[derive(Default, serde::Deserialize, serde::Serialize)]
-#[serde(default)]
-pub struct StoredState {}
 
 #[derive(Default, Clone)]
 pub struct CursorState {
@@ -53,9 +40,27 @@ enum Mode {
     },
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct Settings {
+    pub put_history: bool,
+    pub pos_history: bool,
+    pub skip_spaces: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            pos_history: true,
+            put_history: true,
+            skip_spaces: false,
+        }
+    }
+}
+
 pub struct App {
     texture: TextureHandle,
     text_channel: (Sender<String>, Receiver<String>),
+    settings: Settings,
     mode: Mode,
     scene_rect: Rect,
 }
@@ -69,7 +74,7 @@ fn poss_reverse(pos: Pos2) -> (i64, i64) {
 }
 
 fn recter(pos: (i64, i64)) -> Rect {
-    Rect::from_min_size(poss((pos.0 as f32, pos.1 as f32)), Vec2::new(12.0, 16.0))
+    Rect::from_min_size(poss((pos.0 as f32, pos.1 as f32)), Vec2::new(13.0, 17.0))
 }
 
 impl CursorState {
@@ -124,15 +129,19 @@ impl Mode {
         };
     }
 
-    fn step_befunge_inner(bf_state: &mut BefungeState, running: &mut bool) -> bool {
-        let breakpoint_reached = bf_state.step();
+    fn step_befunge_inner(
+        bf_state: &mut BefungeState,
+        running: &mut bool,
+        settings: &Settings,
+    ) -> bool {
+        let breakpoint_reached = bf_state.step(settings);
         if breakpoint_reached {
             *running = false;
         };
         breakpoint_reached
     }
 
-    fn step_befunge(&mut self, ctx: &egui::Context) {
+    fn step_befunge(&mut self, ctx: &egui::Context, settings: &Settings) {
         match self {
             Mode::Editing { .. } => (),
             Mode::Playing {
@@ -155,18 +164,18 @@ impl Mode {
                 if elapsed >= time_per_step {
                     match speed {
                         ..6 => {
-                            Self::step_befunge_inner(bf_state, running);
+                            Self::step_befunge_inner(bf_state, running, settings);
                         }
                         6..=9 => {
                             for _ in 0..=*speed - 6 {
-                                if Self::step_befunge_inner(bf_state, running) {
+                                if Self::step_befunge_inner(bf_state, running, settings) {
                                     return;
                                 };
                             }
                         }
                         10..=15 => {
                             for _ in 0..=2_usize.pow(*speed as u32 - 8) {
-                                if Self::step_befunge_inner(bf_state, running) {
+                                if Self::step_befunge_inner(bf_state, running, settings) {
                                     return;
                                 };
                             }
@@ -175,7 +184,7 @@ impl Mode {
                             let now = Instant::now();
                             loop {
                                 for _ in 0..=10000 {
-                                    if Self::step_befunge_inner(bf_state, running) {
+                                    if Self::step_befunge_inner(bf_state, running, settings) {
                                         return;
                                     }
                                 }
@@ -212,30 +221,16 @@ impl App {
 
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
-        //if let Some(storage) = cc.storage {
-        //    return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
-        //}
-
-        /*
-        use clap::Parser;
-        #[derive(Parser, Debug)]
-        #[command(about="", long_about = None)]
-        struct Args {
-            #[arg(short, long)]
-            filename: Option<String>,
-        }
-
-        let args = Args::parse();
-        let bf_state = if let Some(file) = args.filename {
-            BefungeState::new_from_string(fs::read_to_string(file).unwrap())
+        let settings = if let Some(storage) = cc.storage {
+            eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
         } else {
-            BefungeState::new()
-        }
-        */
+            Settings::default()
+        };
 
         Self {
             scene_rect: Rect::ZERO,
             text_channel: channel(),
+            settings,
             mode: Mode::Editing {
                 cursor_state: CursorState::default(),
                 fungespace: FungeSpace::new(),
@@ -252,7 +247,7 @@ impl App {
 impl eframe::App for App {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        //eframe::set_value(storage, eframe::APP_KEY, self);
+        eframe::set_value(storage, eframe::APP_KEY, &self.settings);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -269,7 +264,7 @@ impl eframe::App for App {
             }
 
             if running {
-                self.mode.step_befunge(ctx);
+                self.mode.step_befunge(ctx, &self.settings);
             }
         }
 
@@ -328,7 +323,7 @@ impl eframe::App for App {
             {
                 ui.horizontal(|ui| {
                     if ui.button("step").clicked() {
-                        bf_state.step();
+                        bf_state.step(&self.settings);
                     }
                     ui.checkbox(running, "play");
                     ui.checkbox(follow, "follow");
@@ -440,54 +435,54 @@ impl App {
             )));
         }
 
-        let scene_rect = self.scene_rect;
         let response = scene
             .show(ui, &mut self.scene_rect, |ui| {
                 let painter = ui.painter();
+                let clip_rect = painter.clip_rect();
 
-                // JANK GRID PATTERN
-                /*
-                let mut i = -0.5;
-                let left = f32::max(scene_rect.left(), -0.5);
+                // Grid dots
+                let mut y = f32::max((clip_rect.top() / 17.0).round() * 17.0, 17.0);
                 loop {
-                    painter.line_segment(
-                        [
-                            Pos2::new(left, i),
-                            Pos2::new(scene_rect.right(), i),
-                        ],
-                        Stroke::new(1.0, Color32::from_gray(50)),
-                    );
-                    i += 17.0;
-                    if i > scene_rect.bottom() {
+                    let mut x = f32::max((clip_rect.left() / 13.0).round() * 13.0, 13.0);
+                    loop {
+                        painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
+                        if x > clip_rect.right() {
+                            break;
+                        };
+                        x += 13.0;
+                    }
+                    if y > clip_rect.bottom() {
                         break;
                     };
-                };
+                    y += 17.0;
+                }
 
-                let mut i = -0.5;
-                let top = f32::max(scene_rect.top(), -0.5);
-                loop {
+                // Border lines
                 painter.line_segment(
                     [
-                        Pos2::new(i, top),
-                        Pos2::new(i, scene_rect.bottom()),
+                        Pos2::new(f32::max(clip_rect.left(), -0.5), -0.5),
+                        Pos2::new(clip_rect.right(), -0.5),
                     ],
                     Stroke::new(1.0, Color32::from_gray(50)),
                 );
-                    i += 13.0;
-                    if i > scene_rect.right() {
-                        break;
-                    };
-                };
-                */
 
-                // TODO: consider doing lil dots instead of grid
-                // so it looks less bad
+                painter.line_segment(
+                    [
+                        Pos2::new(-0.5, f32::max(clip_rect.top(), -0.5)),
+                        Pos2::new(-0.5, clip_rect.bottom()),
+                    ],
+                    Stroke::new(1.0, Color32::from_gray(50)),
+                );
 
                 match &mut self.mode {
                     Mode::Playing { bf_state, .. } => {
                         // TODO: move this somewhere more sensible
                         bf_state
                             .pos_history
+                            .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+
+                        bf_state
+                            .put_history
                             .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
                         painter.rect(
@@ -514,6 +509,23 @@ impl App {
                             );
                         }
 
+                        for (pos, instant) in &bf_state.put_history {
+                            let rect = recter(*pos);
+                            let time = (instant.elapsed().as_millis() as f32) / 1000.0;
+                            let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
+                            if mult < 0.0 {
+                                mult = 0.0
+                            }
+
+                            painter.rect(
+                                rect,
+                                0.0,
+                                Color32::GREEN.gamma_multiply(mult),
+                                Stroke::NONE,
+                                StrokeKind::Outside,
+                            );
+                        }
+
                         for pos in &bf_state.breakpoints {
                             let rect = recter(*pos);
 
@@ -535,8 +547,8 @@ impl App {
                             } else {
                                 Color32::LIGHT_BLUE
                             },
-                            Stroke::NONE,
-                            StrokeKind::Outside,
+                            Stroke::new(0.25, Color32::from_gray(90)),
+                            StrokeKind::Inside,
                         );
                     }
                 };
@@ -683,7 +695,9 @@ impl App {
             });
 
             ui.menu_button("Settings", |ui| {
-                //ui.checkbox(&mut self.extra, "extra info");
+                ui.checkbox(&mut self.settings.put_history, "Track puts");
+                ui.checkbox(&mut self.settings.pos_history, "Track position history");
+                ui.checkbox(&mut self.settings.skip_spaces, "Skip spaces");
             });
             ui.add_space(8.0);
 

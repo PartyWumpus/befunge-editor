@@ -8,6 +8,8 @@ use egui::{
 use std::{collections::VecDeque, iter};
 
 use egui::ahash::HashMap;
+
+use crate::app::Settings;
 /*
 #[cfg(target_arch = "wasm32")]
 use egui::ahash::HashMap;
@@ -62,6 +64,7 @@ pub struct State {
     pub position: (i64, i64),
     pub direction: Direction,
     pub pos_history: HashMap<(i64, i64), Instant>,
+    pub put_history: HashMap<(i64, i64), Instant>,
     pub stack: Vec<i64>,
     pub string_mode: bool,
     pub output: String,
@@ -193,6 +196,7 @@ impl Default for State {
             position: (0, 0),
             direction: Direction::East,
             pos_history: HashMap::default(),
+            put_history: HashMap::default(),
             stack: Vec::new(),
             output: String::new(),
             graphics: None,
@@ -219,15 +223,17 @@ impl State {
         }
     }
 
-    fn step_position(&mut self) {
+    fn step_position(&mut self, settings: &Settings) {
         self.step_position_inner();
         let (x, y) = self.position;
-        if let Some(prev_time) = self.pos_history.get(&(x, y)) {
-            if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
+        if settings.pos_history {
+            if let Some(prev_time) = self.pos_history.get(&(x, y)) {
+                if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
+                    self.pos_history.insert((x, y), Instant::recent());
+                }
+            } else {
                 self.pos_history.insert((x, y), Instant::recent());
             }
-        } else {
-            self.pos_history.insert((x, y), Instant::recent());
         }
     }
 
@@ -241,27 +247,27 @@ impl State {
         }
     }
 
-    pub fn step(&mut self) -> bool {
-        let mut res = self.step_inner();
+    pub fn step(&mut self, settings: &Settings) -> bool {
+        let mut res = self.step_inner(settings);
         if self.breakpoints.contains(&self.position) {
             res = true;
         }
         // skip up to 100 spaces if not in string mode
-        /*if !self.string_mode {
+        if settings.skip_spaces && !self.string_mode {
             let mut safety_counter = 0;
             loop {
                 safety_counter += 1;
                 if safety_counter < 100 && self.map.get_wrapped(self.position) == b' ' as i64 {
-                    self.step_position();
+                    self.step_position(settings);
                 } else {
                     break;
                 }
             }
-        };*/
+        };
         res
     }
 
-    fn step_inner(&mut self) -> bool {
+    fn step_inner(&mut self, settings: &Settings) -> bool {
         let op = self.map.get(self.position);
 
         if self.string_mode {
@@ -273,14 +279,15 @@ impl State {
             }
         } else if let Some(op) = op
             && let Ok(op) = op.try_into()
-            && self.do_op(op) {
-                return true;
-            }
-        self.step_position();
+            && self.do_op(op, settings)
+        {
+            return true;
+        }
+        self.step_position(settings);
         false
     }
 
-    fn do_op(&mut self, op: u8) -> bool {
+    fn do_op(&mut self, op: u8, settings: &Settings) -> bool {
         match op {
             b'"' => self.string_mode = true,
 
@@ -370,6 +377,16 @@ impl State {
                 let y = self.pop();
                 let x = self.pop();
                 let value = self.pop();
+
+                if settings.put_history {
+                    if let Some(prev_time) = self.put_history.get(&(x, y)) {
+                        if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
+                            self.put_history.insert((x, y), Instant::recent());
+                        }
+                    } else {
+                        self.put_history.insert((x, y), Instant::recent());
+                    }
+                }
 
                 self.map.set((x, y), value);
             }
