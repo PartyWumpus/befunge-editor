@@ -2,6 +2,7 @@ use coarsetime::{Duration, Instant};
 use core::f32;
 use egui::StrokeKind;
 use std::future::Future;
+use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
@@ -45,6 +46,7 @@ pub struct Settings {
     pub put_history: bool,
     pub pos_history: bool,
     pub skip_spaces: bool,
+    pub render_unicode: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             pos_history: true,
             put_history: true,
             skip_spaces: false,
+            render_unicode: true,
         }
     }
 }
@@ -441,20 +444,22 @@ impl App {
                 let clip_rect = painter.clip_rect();
 
                 // Grid dots
-                let mut y = f32::max((clip_rect.top() / 17.0).round() * 17.0, 17.0);
-                loop {
-                    let mut x = f32::max((clip_rect.left() / 13.0).round() * 13.0, 13.0);
+                if clip_rect.height() < 2500.0 {
+                    let mut y = f32::max((clip_rect.top() / 17.0).round() * 17.0, 17.0);
                     loop {
-                        painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
-                        if x > clip_rect.right() {
+                        let mut x = f32::max((clip_rect.left() / 13.0).round() * 13.0, 13.0);
+                        loop {
+                            painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
+                            if x > clip_rect.right() {
+                                break;
+                            };
+                            x += 13.0;
+                        }
+                        if y > clip_rect.bottom() {
                             break;
                         };
-                        x += 13.0;
+                        y += 17.0;
                     }
-                    if y > clip_rect.bottom() {
-                        break;
-                    };
-                    y += 17.0;
                 }
 
                 // Border lines
@@ -591,11 +596,55 @@ impl App {
                                 egui::Label::new(String::from(val as char)).selectable(false),
                             )
                         }
+                    } else if self.settings.render_unicode
+                        && let Ok(val) = val.try_into()
+                        && let Some(val) = char::from_u32(val)
+                        && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
+                    {
+                        ui.put(pos, egui::Label::new(String::from(val)).selectable(false))
                     } else {
                         ui.put(pos, |ui: &mut Ui| {
+                            // this is not great
+                            // i'm not really sure what the best way to do this would be
+                            let str = format!("{val:X}");
+                            let n = str.len();
+                            let font_size = match n {
+                                ..=1 => 16.0,
+                                2 => 8.0,
+                                3..=6 => 6.0,
+                                7..16 => 4.0,
+                                16.. => 3.2,
+                            };
+
+                            let ranges: &[Range<usize>] = match n {
+                                0..4 => &[0..n],
+                                4 => &[0..2, 2..n],
+                                5 | 6 => &[0..3, 3..n],
+                                7 | 8 | 9 => &[0..3, 3..6, 6..n],
+                                10 => &[0..4, 4..7, 7..n],
+                                11 | 12 => &[0..4, 4..8, 8..n],
+                                13 => &[0..5, 5..9, 9..n],
+                                14 | 15 => &[0..5, 5..10, 10..n],
+                                16.. => &[0..4, 4..8, 8..12, 12..n],
+                            };
+
+                            let str = ranges
+                                .iter()
+                                .map(|range| &str[range.clone()])
+                                .collect::<Vec<_>>()
+                                .join("\n");
+
                             Frame::default()
                                 .stroke(Stroke::new(0.5, Color32::GRAY))
-                                .show(ui, |ui| ui.add(egui::Label::new("X").selectable(false)))
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(str)
+                                                .font(egui::FontId::monospace(font_size)),
+                                        )
+                                        .selectable(false),
+                                    )
+                                })
                                 .response
                         })
                     }
@@ -630,7 +679,7 @@ impl App {
             && response.secondary_clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
-            // TODO, a "run through to click" feature
+            // TODO, a "run through to click" feature?
         };
     }
 
@@ -698,6 +747,10 @@ impl App {
                 ui.checkbox(&mut self.settings.put_history, "Track puts");
                 ui.checkbox(&mut self.settings.pos_history, "Track position history");
                 ui.checkbox(&mut self.settings.skip_spaces, "Skip spaces");
+                ui.checkbox(
+                    &mut self.settings.render_unicode,
+                    "Display non-ascii characters",
+                );
             });
             ui.add_space(8.0);
 
