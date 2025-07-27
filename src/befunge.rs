@@ -64,6 +64,7 @@ pub struct State {
     pub position: (i64, i64),
     pub direction: Direction,
     pub pos_history: HashMap<(i64, i64), Instant>,
+    pub get_history: HashMap<(i64, i64), Instant>,
     pub put_history: HashMap<(i64, i64), Instant>,
     pub stack: Vec<i64>,
     pub string_mode: bool,
@@ -197,6 +198,7 @@ impl Default for State {
             direction: Direction::East,
             pos_history: HashMap::default(),
             put_history: HashMap::default(),
+            get_history: HashMap::default(),
             stack: Vec::new(),
             output: String::new(),
             graphics: None,
@@ -226,7 +228,7 @@ impl State {
     fn step_position(&mut self, settings: &Settings) {
         self.step_position_inner();
         let (x, y) = self.position;
-        if settings.pos_history {
+        if settings.pos_history.0 {
             if let Some(prev_time) = self.pos_history.get(&(x, y)) {
                 if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
                     self.pos_history.insert((x, y), Instant::recent());
@@ -245,6 +247,15 @@ impl State {
             Direction::East => self.position = (x + 1, y),
             Direction::West => self.position = (x - 1, y),
         }
+
+        if self.position.0 < 0 {
+            self.position.0 += i64::MAX;
+            self.position.0 += 1;
+        };
+        if self.position.1 < 0 {
+            self.position.1 += i64::MAX;
+            self.position.1 += 1;
+        };
     }
 
     pub fn step(&mut self, settings: &Settings) -> bool {
@@ -257,7 +268,7 @@ impl State {
             let mut safety_counter = 0;
             loop {
                 safety_counter += 1;
-                if safety_counter < 100 && self.map.get_wrapped(self.position) == b' ' as i64 {
+                if safety_counter < 1000 && self.map.get_wrapped(self.position) == b' ' as i64 {
                     self.step_position(settings);
                 } else {
                     break;
@@ -378,7 +389,7 @@ impl State {
                 let x = self.pop();
                 let value = self.pop();
 
-                if settings.put_history {
+                if settings.put_history.0 {
                     if let Some(prev_time) = self.put_history.get(&(x, y)) {
                         if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
                             self.put_history.insert((x, y), Instant::recent());
@@ -396,6 +407,16 @@ impl State {
                 let y = self.pop();
                 let x = self.pop();
                 self.stack.push(self.map.get_wrapped((x, y)));
+
+                if settings.get_history.0 {
+                    if let Some(prev_time) = self.get_history.get(&(x, y)) {
+                        if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
+                            self.get_history.insert((x, y), Instant::recent());
+                        }
+                    } else {
+                        self.get_history.insert((x, y), Instant::recent());
+                    }
+                }
             }
 
             // input

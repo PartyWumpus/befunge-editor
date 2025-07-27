@@ -1,6 +1,6 @@
 use coarsetime::{Duration, Instant};
 use core::f32;
-use egui::StrokeKind;
+use egui::{FontId, Id, Modal, RichText, StrokeKind};
 use std::future::Future;
 use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
 use crate::BefungeState;
-use crate::befunge::{Event, FungeSpace, Graphics, get_color_of_bf_op};
+use crate::befunge::{Event, FungeSpace, get_color_of_bf_op};
 #[derive(Default, Clone)]
 enum Direction {
     North,
@@ -23,6 +23,12 @@ pub struct CursorState {
     location: (i64, i64),
     direction: Direction,
     string_mode: bool,
+}
+
+impl CursorState {
+    fn new(location: (i64, i64)) -> Self {
+        Self {location, ..Default::default()}
+    }
 }
 
 #[derive(Clone)]
@@ -43,8 +49,9 @@ enum Mode {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct Settings {
-    pub put_history: bool,
-    pub pos_history: bool,
+    pub pos_history: (bool, [u8; 3]),
+    pub get_history: (bool, [u8; 3]),
+    pub put_history: (bool, [u8; 3]),
     pub skip_spaces: bool,
     pub render_unicode: bool,
 }
@@ -52,8 +59,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            pos_history: true,
-            put_history: true,
+            pos_history: (true, [128, 0, 128]),
+            get_history: (false, [255, 0, 0]),
+            put_history: (true, [0, 255, 0]),
             skip_spaces: false,
             render_unicode: true,
         }
@@ -66,18 +74,20 @@ pub struct App {
     settings: Settings,
     mode: Mode,
     scene_rect: Rect,
+    settings_modal_open: bool,
+    scene_offset: (i64, i64),
+    cursor_pos: (i64, i64),
 }
 
 fn poss(pos: (f32, f32)) -> Pos2 {
     Pos2::new((pos.0) * 13.0, (pos.1) * 17.0)
 }
 
-fn poss_reverse(pos: Pos2) -> (i64, i64) {
-    ((pos.x / 13.0) as i64, (pos.y / 17.0) as i64)
-}
-
-fn recter(pos: (i64, i64)) -> Rect {
-    Rect::from_min_size(poss((pos.0 as f32, pos.1 as f32)), Vec2::new(13.0, 17.0))
+fn poss_reverse(pos: Pos2, offset: (i64, i64)) -> (i64, i64) {
+    (
+        (pos.x / 13.0) as i64 + offset.0,
+        (pos.y / 17.0) as i64 + offset.1,
+    )
 }
 
 impl CursorState {
@@ -125,8 +135,8 @@ impl Mode {
                 follow: false,
                 speed: 5,
             },
-            Mode::Playing { snapshot, .. } => Mode::Editing {
-                cursor_state: CursorState::default(),
+            Mode::Playing { snapshot, bf_state, .. } => Mode::Editing {
+                cursor_state: CursorState::new(bf_state.position),
                 fungespace: snapshot,
             },
         };
@@ -234,6 +244,8 @@ impl App {
             scene_rect: Rect::ZERO,
             text_channel: channel(),
             settings,
+            scene_offset: (0, 0),
+            cursor_pos: (0, 0),
             mode: Mode::Editing {
                 cursor_state: CursorState::default(),
                 fungespace: FungeSpace::new(),
@@ -243,8 +255,17 @@ impl App {
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
+
+            settings_modal_open: false,
         }
     }
+}
+
+fn recter(pos: (i64, i64), offset: (i64, i64)) -> Rect {
+    Rect::from_min_size(
+        poss(((pos.0 - offset.0) as f32, (pos.1 - offset.1) as f32)),
+        Vec2::new(13.0, 17.0),
+    )
 }
 
 impl eframe::App for App {
@@ -294,8 +315,10 @@ impl eframe::App for App {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::warn_if_debug_build(ui);
+
+                    ui.label(self.cursor_pos.0.to_string());
+                    ui.label(self.cursor_pos.1.to_string());
                 });
-                ui.rect_contains_pointer(ui.max_rect());
             });
         });
 
@@ -332,7 +355,9 @@ impl eframe::App for App {
                     ui.checkbox(follow, "follow");
                 });
 
-                ui.add(egui::Slider::new(speed, 1..=19).text("value"));
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(speed, 1..=19).text("value"));
+                });
             }
 
             egui::Frame::group(ui.style())
@@ -422,7 +447,7 @@ impl App {
     }
 
     fn befunge_scene(&mut self, ui: &mut egui::Ui) {
-        let scene = Scene::new()
+        let mut scene = Scene::new()
             .max_inner_size([f32::INFINITY, f32::INFINITY])
             .zoom_range(0.01..=5.0);
 
@@ -432,10 +457,34 @@ impl App {
             ..
         } = &self.mode
         {
-            self.scene_rect.set_center(poss((
-                bf_state.position.0 as f32 + 0.5,
-                bf_state.position.1 as f32 + 0.5,
-            )));
+            self.scene_offset = bf_state.position.clone();
+            self.scene_rect.set_center(poss((0.5, 0.5)));
+            // disables panning, TODO: disable scrolling
+            scene = scene.sense(Sense::HOVER);
+        } else {
+            if self.scene_rect.left() >= 130.0 {
+                *self.scene_rect.left_mut() -= 130.0;
+                *self.scene_rect.right_mut() -= 130.0;
+                self.scene_offset.0 += 10;
+            };
+
+            if self.scene_rect.left() <= -130.0 {
+                *self.scene_rect.left_mut() += 130.0;
+                *self.scene_rect.right_mut() += 130.0;
+                self.scene_offset.0 -= 10;
+            };
+
+            if self.scene_rect.top() >= 170.0 {
+                *self.scene_rect.top_mut() -= 170.0;
+                *self.scene_rect.bottom_mut() -= 170.0;
+                self.scene_offset.1 += 10;
+            };
+
+            if self.scene_rect.top() <= -170.0 {
+                *self.scene_rect.top_mut() += 170.0;
+                *self.scene_rect.bottom_mut() += 170.0;
+                self.scene_offset.1 -= 10;
+            };
         }
 
         let response = scene
@@ -445,17 +494,29 @@ impl App {
 
                 // Grid dots
                 if clip_rect.height() < 2500.0 {
-                    let mut y = f32::max((clip_rect.top() / 17.0).round() * 17.0, 17.0);
+                    let mut y = f32::max(
+                        (clip_rect.top() / 17.0).round() * 17.0,
+                        17.0 - (self.scene_offset.1 as f32 * 17.0),
+                    );
                     loop {
-                        let mut x = f32::max((clip_rect.left() / 13.0).round() * 13.0, 13.0);
+                        let mut x = f32::max(
+                            (clip_rect.left() / 13.0).round() * 13.0,
+                            13.0 - (self.scene_offset.0 as f32 * 13.0),
+                        );
                         loop {
                             painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
-                            if x > clip_rect.right() {
+                            if x > f32::min(
+                                clip_rect.right(),
+                                (i64::MAX - i64::max(self.scene_offset.0, 0) - 1) as f32 * 13.0,
+                            ) {
                                 break;
                             };
                             x += 13.0;
                         }
-                        if y > clip_rect.bottom() {
+                        if y > f32::min(
+                            clip_rect.bottom(),
+                            (i64::MAX - i64::max(self.scene_offset.1, 0) - 1) as f32 * 17.0,
+                        ) {
                             break;
                         };
                         y += 17.0;
@@ -463,18 +524,74 @@ impl App {
                 }
 
                 // Border lines
+                // Top line
                 painter.line_segment(
                     [
-                        Pos2::new(f32::max(clip_rect.left(), -0.5), -0.5),
-                        Pos2::new(clip_rect.right(), -0.5),
+                        Pos2::new(
+                            f32::max(clip_rect.left(), -1.0 - (self.scene_offset.0 as f32) * 13.0),
+                            -0.5 - (self.scene_offset.1 as f32) * 17.0,
+                        ),
+                        Pos2::new(
+                            f32::min(
+                                clip_rect.right(),
+                                ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0) * 13.0,
+                            ),
+                            -0.5 - (self.scene_offset.1 as f32) * 17.0,
+                        ),
                     ],
                     Stroke::new(1.0, Color32::from_gray(50)),
                 );
 
+                // Bottom line
                 painter.line_segment(
                     [
-                        Pos2::new(-0.5, f32::max(clip_rect.top(), -0.5)),
-                        Pos2::new(-0.5, clip_rect.bottom()),
+                        Pos2::new(
+                            f32::max(clip_rect.left(), -1.0 - (self.scene_offset.0 as f32) * 13.0),
+                            0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
+                        ),
+                        Pos2::new(
+                            f32::min(
+                                clip_rect.right(),
+                                ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0) * 13.0,
+                            ),
+                            0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
+                        ),
+                    ],
+                    Stroke::new(1.0, Color32::from_gray(50)),
+                );
+
+                // Left line
+                painter.line_segment(
+                    [
+                        Pos2::new(
+                            -0.5 - (self.scene_offset.0 as f32) * 13.0,
+                            f32::max(clip_rect.top(), -1.0 - (self.scene_offset.1 as f32) * 17.0),
+                        ),
+                        Pos2::new(
+                            -0.5 - (self.scene_offset.0 as f32) * 13.0,
+                            f32::min(
+                                clip_rect.bottom(),
+                                ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0) * 17.0,
+                            ),
+                        ),
+                    ],
+                    Stroke::new(1.0, Color32::from_gray(50)),
+                );
+
+                // Right line
+                painter.line_segment(
+                    [
+                        Pos2::new(
+                            0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
+                            f32::max(clip_rect.top(), -1.0 - (self.scene_offset.1 as f32) * 17.0),
+                        ),
+                        Pos2::new(
+                            0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
+                            f32::min(
+                                clip_rect.bottom(),
+                                ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0) * 17.0,
+                            ),
+                        ),
                     ],
                     Stroke::new(1.0, Color32::from_gray(50)),
                 );
@@ -490,49 +607,73 @@ impl App {
                             .put_history
                             .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
+                        bf_state
+                            .get_history
+                            .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+
                         painter.rect(
-                            recter(bf_state.position),
+                            recter(bf_state.position, self.scene_offset),
                             0.0,
                             Color32::PURPLE,
                             Stroke::NONE,
                             StrokeKind::Outside,
                         );
                         for (pos, instant) in &bf_state.pos_history {
-                            let rect = recter(*pos);
+                            let rect = recter(*pos, self.scene_offset);
                             let time = (instant.elapsed().as_millis() as f32) / 1000.0;
                             let mut mult = f32::log2(5.0 - time) - 1.322 - 0.3;
                             if mult < 0.0 {
                                 mult = 0.0
                             }
 
+                            let [r, g, b] = self.settings.pos_history.1;
                             painter.rect(
                                 rect,
                                 0.0,
-                                Color32::PURPLE.gamma_multiply(mult),
+                                Color32::from_rgb(r, g, b).gamma_multiply(mult),
                                 Stroke::NONE,
                                 StrokeKind::Outside,
                             );
                         }
 
                         for (pos, instant) in &bf_state.put_history {
-                            let rect = recter(*pos);
+                            let rect = recter(*pos, self.scene_offset);
                             let time = (instant.elapsed().as_millis() as f32) / 1000.0;
                             let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
                             if mult < 0.0 {
                                 mult = 0.0
                             }
 
+                            let [r, g, b] = self.settings.put_history.1;
                             painter.rect(
                                 rect,
                                 0.0,
-                                Color32::GREEN.gamma_multiply(mult),
+                                Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                Stroke::NONE,
+                                StrokeKind::Outside,
+                            );
+                        }
+
+                        for (pos, instant) in &bf_state.get_history {
+                            let rect = recter(*pos, self.scene_offset);
+                            let time = (instant.elapsed().as_millis() as f32) / 1000.0;
+                            let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
+                            if mult < 0.0 {
+                                mult = 0.0
+                            }
+
+                            let [r, g, b] = self.settings.get_history.1;
+                            painter.rect(
+                                rect,
+                                0.0,
+                                Color32::from_rgb(r, g, b).gamma_multiply(mult),
                                 Stroke::NONE,
                                 StrokeKind::Outside,
                             );
                         }
 
                         for pos in &bf_state.breakpoints {
-                            let rect = recter(*pos);
+                            let rect = recter(*pos, self.scene_offset);
 
                             painter.rect(
                                 rect,
@@ -545,7 +686,7 @@ impl App {
                     }
                     Mode::Editing { cursor_state, .. } => {
                         painter.rect(
-                            recter(cursor_state.location),
+                            recter(cursor_state.location, self.scene_offset),
                             0.0,
                             if cursor_state.string_mode {
                                 Color32::LIGHT_GREEN
@@ -563,7 +704,7 @@ impl App {
                     Mode::Editing { fungespace, .. } => fungespace,
                 };
                 for (pos, val) in map.entries() {
-                    let pos = recter(pos);
+                    let pos = recter(pos, self.scene_offset);
 
                     if let Ok(val) = TryInto::<u8>::try_into(val)
                         && val <= b'~'
@@ -653,13 +794,20 @@ impl App {
             })
             .response;
 
+        if response.contains_pointer() && let Some(pos) = response.hover_pos() {
+            let (x,y) = poss_reverse(pos, self.scene_offset);
+            if x >= 0 && y >= 0 {
+                self.cursor_pos = (x,y)
+            }
+        };
+
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
+            let pos = poss_reverse(pos, self.scene_offset);
             match &mut self.mode {
                 Mode::Playing { bf_state, .. } => {
-                    if pos.x > 0.0 && pos.y > 0.0 {
-                        let pos = poss_reverse(pos);
+                    if pos.0 >= 0 && pos.1 >= 0 {
                         if bf_state.breakpoints.contains(&pos) {
                             bf_state.breakpoints.remove(&pos)
                         } else {
@@ -668,8 +816,8 @@ impl App {
                     }
                 }
                 Mode::Editing { cursor_state, .. } => {
-                    if pos.x > 0.0 && pos.y > 0.0 {
-                        cursor_state.location = poss_reverse(pos);
+                    if pos.1 >= 0 && pos.0 >= 0 {
+                        cursor_state.location = pos;
                     }
                 }
             }
@@ -743,14 +891,70 @@ impl App {
                 });
             });
 
+            if self.settings_modal_open {
+                let modal = Modal::new(Id::new("Settings modal")).show(ui.ctx(), |ui| {
+                    ui.set_width(300.0);
+                    ui.heading("Advanced settings");
+
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Track position history").font(FontId::proportional(14.0)),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.color_edit_button_srgb(&mut self.settings.pos_history.1);
+                        ui.label("Color");
+                    });
+                    ui.horizontal(|ui| ui.checkbox(&mut self.settings.pos_history.0, "Enabled"));
+
+                    ui.separator();
+                    ui.label(RichText::new("Track put history").font(FontId::proportional(14.0)));
+                    ui.horizontal(|ui| {
+                        ui.color_edit_button_srgb(&mut self.settings.put_history.1);
+                        ui.label("Color");
+                    });
+                    ui.checkbox(&mut self.settings.put_history.0, "Enabled");
+
+                    ui.separator();
+                    ui.label(RichText::new("Track get history").font(FontId::proportional(14.0)));
+                    ui.horizontal(|ui| {
+                        ui.color_edit_button_srgb(&mut self.settings.get_history.1);
+                        ui.label("Color");
+                    });
+                    ui.horizontal(|ui| ui.checkbox(&mut self.settings.get_history.0, "Enabled"));
+
+                    ui.separator();
+                    if ui.button("Reset all settings").clicked() {
+                        self.settings = Settings::default();
+                    };
+
+                    ui.add_space(32.0);
+
+                    egui::Sides::new().show(
+                        ui,
+                        |_ui| {},
+                        |ui| {
+                            if ui.button("Close").clicked() {
+                                ui.close();
+                            }
+                        },
+                    );
+                });
+
+                if modal.should_close() {
+                    self.settings_modal_open = false;
+                }
+            }
+
             ui.menu_button("Settings", |ui| {
-                ui.checkbox(&mut self.settings.put_history, "Track puts");
-                ui.checkbox(&mut self.settings.pos_history, "Track position history");
+                ui.checkbox(&mut self.settings.pos_history.0, "Track position history");
                 ui.checkbox(&mut self.settings.skip_spaces, "Skip spaces");
                 ui.checkbox(
                     &mut self.settings.render_unicode,
                     "Display non-ascii characters",
                 );
+                if ui.button("Advanced settings").clicked() {
+                    self.settings_modal_open = true
+                };
             });
             ui.add_space(8.0);
 
@@ -765,6 +969,7 @@ impl App {
                 self.texture.set(
                     egui::ColorImage {
                         size: [graphics.size.0, graphics.size.1],
+                        source_size: Vec2::new(graphics.size.0 as f32, graphics.size.1 as f32),
                         pixels: graphics.texture.clone(),
                     },
                     egui::TextureOptions::NEAREST,
