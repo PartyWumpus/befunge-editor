@@ -443,6 +443,7 @@ impl State {
             b'.' => {
                 let a = self.pop().to_string();
                 self.output.push_str(&a);
+                self.output.push(' ');
             }
             b',' => {
                 let a = (self.pop() as u32).try_into().unwrap();
