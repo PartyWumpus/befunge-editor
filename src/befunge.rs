@@ -89,7 +89,7 @@ impl FungeSpace {
         }
     }
 
-    pub fn new_from_string(input: String) -> Self {
+    pub fn new_from_string(input: &str) -> Self {
         let mut map = FungeSpace::new();
         for (y, line) in input.lines().enumerate() {
             for (x, char) in line.chars().enumerate() {
@@ -184,7 +184,7 @@ impl Graphics {
 
     pub fn pixel(&mut self, x: usize, y: usize) {
         // FIXME: error here on out of bounds
-        let index = x + y * self.size.1;
+        let index = x + y * self.size.0;
         self.texture[index] = self.current_color;
     }
 }

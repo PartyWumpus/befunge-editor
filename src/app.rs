@@ -1,6 +1,8 @@
 use coarsetime::{Duration, Instant};
 use core::f32;
+use egui::ahash::HashMap;
 use egui::{FontId, Id, Modal, RichText, StrokeKind};
+use phf::phf_map;
 use std::future::Future;
 use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -9,6 +11,24 @@ use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, 
 
 use crate::BefungeState;
 use crate::befunge::{Event, FungeSpace, get_color_of_bf_op};
+
+static PRESETS: phf::Map<&'static str, &'static str> = phf_map! {
+    "Addition" => "5 5 + .",
+    "smile" =>r#"v
+
+>        92+8         "~"v
+         vsp0         0*2<
+         >g:f         2:xv
+         vx51         x59<
+          
+      >          v          v
+      ^<                   vv
+       ^$8               <<_       @    
+       ^^>2v           >:9-^
+          ^>x222x>:6x1+^< 
+"#
+};
+
 #[derive(Default, Clone)]
 enum Direction {
     North,
@@ -27,7 +47,10 @@ pub struct CursorState {
 
 impl CursorState {
     fn new(location: (i64, i64)) -> Self {
-        Self {location, ..Default::default()}
+        Self {
+            location,
+            ..Default::default()
+        }
     }
 }
 
@@ -135,7 +158,9 @@ impl Mode {
                 follow: false,
                 speed: 5,
             },
-            Mode::Playing { snapshot, bf_state, .. } => Mode::Editing {
+            Mode::Playing {
+                snapshot, bf_state, ..
+            } => Mode::Editing {
                 cursor_state: CursorState::new(bf_state.position),
                 fungespace: snapshot,
             },
@@ -295,7 +320,7 @@ impl eframe::App for App {
         if let Ok(text) = self.text_channel.1.try_recv() {
             self.mode = Mode::Editing {
                 cursor_state: CursorState::default(),
-                fungespace: FungeSpace::new_from_string(text),
+                fungespace: FungeSpace::new_from_string(&text),
             }
         }
 
@@ -794,10 +819,12 @@ impl App {
             })
             .response;
 
-        if response.contains_pointer() && let Some(pos) = response.hover_pos() {
-            let (x,y) = poss_reverse(pos, self.scene_offset);
+        if response.contains_pointer()
+            && let Some(pos) = response.hover_pos()
+        {
+            let (x, y) = poss_reverse(pos, self.scene_offset);
             if x >= 0 && y >= 0 {
-                self.cursor_pos = (x,y)
+                self.cursor_pos = (x, y)
             }
         };
 
@@ -880,14 +907,19 @@ impl App {
                 }
 
                 ui.menu_button("Presets", |ui| {
-                    /*for key in PRESETS.keys() {
+                    for key in PRESETS.keys() {
                         if ui.button(*key).clicked() {
                             match PRESETS.get(key) {
                                 None => unreachable!(),
-                                Some(data) => self.load(data),
+                                Some(text) => {
+                                    self.mode = Mode::Editing {
+                                        cursor_state: CursorState::default(),
+                                        fungespace: FungeSpace::new_from_string(text),
+                                    }
+                                }
                             }
                         }
-                    }*/
+                    }
                 });
             });
 
