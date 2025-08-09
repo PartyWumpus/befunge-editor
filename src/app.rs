@@ -1,3 +1,4 @@
+use clap::error;
 use coarsetime::{Duration, Instant};
 use core::f32;
 use egui::scroll_area::ScrollBarVisibility;
@@ -11,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
 use crate::BefungeState;
-use crate::befunge::{Event, FungeSpace, get_color_of_bf_op};
+use crate::befunge::{Event, FungeSpace, StepStatus, get_color_of_bf_op};
 
 static PRESETS: phf::Map<&'static str, &'static str> = phf_map! {
     "Addition" => "5 5 + .",
@@ -68,6 +69,7 @@ enum Mode {
         running: bool,
         follow: bool,
         speed: u8,
+        error_state: Option<&'static str>,
     },
 }
 
@@ -158,6 +160,7 @@ impl Mode {
                 running: false,
                 follow: false,
                 speed: 5,
+                error_state: None,
             },
             Mode::Playing {
                 snapshot, bf_state, ..
@@ -171,13 +174,21 @@ impl Mode {
     fn step_befunge_inner(
         bf_state: &mut BefungeState,
         running: &mut bool,
+        error_state: &mut Option<&'static str>,
         settings: &Settings,
     ) -> bool {
-        let breakpoint_reached = bf_state.step(settings);
-        if breakpoint_reached {
-            *running = false;
-        };
-        breakpoint_reached
+        let step_state = bf_state.step(settings);
+        match step_state {
+            StepStatus::Normal => false,
+            StepStatus::Breakpoint => {
+                *running = false;
+                true
+            }
+            StepStatus::Error(error) => {
+                *error_state = Some(error);
+                true
+            },
+        }
     }
 
     fn step_befunge(&mut self, ctx: &egui::Context, settings: &Settings) {
@@ -188,6 +199,7 @@ impl Mode {
                 speed,
                 bf_state,
                 running,
+                error_state,
                 ..
             } => {
                 let elapsed = time_since_step.elapsed();
@@ -203,18 +215,18 @@ impl Mode {
                 if elapsed >= time_per_step {
                     match speed {
                         ..6 => {
-                            Self::step_befunge_inner(bf_state, running, settings);
+                            Self::step_befunge_inner(bf_state, running, error_state, settings);
                         }
                         6..=9 => {
                             for _ in 0..=*speed - 6 {
-                                if Self::step_befunge_inner(bf_state, running, settings) {
+                                if Self::step_befunge_inner(bf_state, running, error_state, settings) {
                                     return;
                                 };
                             }
                         }
                         10..=15 => {
                             for _ in 0..=2_usize.pow(*speed as u32 - 8) {
-                                if Self::step_befunge_inner(bf_state, running, settings) {
+                                if Self::step_befunge_inner(bf_state, running, error_state, settings) {
                                     return;
                                 };
                             }
@@ -223,7 +235,7 @@ impl Mode {
                             let now = Instant::now();
                             loop {
                                 for _ in 0..=10000 {
-                                    if Self::step_befunge_inner(bf_state, running, settings) {
+                                    if Self::step_befunge_inner(bf_state, running, error_state, settings) {
                                         return;
                                     }
                                 }
@@ -355,7 +367,12 @@ impl eframe::App for App {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("befunge editor");
+            ui.horizontal(|ui| {
+                ui.heading("befunge editor");
+                if let Mode::Playing{error_state: Some(error), .. } = self.mode {
+                    ui.label(RichText::new(error).color(Color32::RED));
+                };
+            });
 
             let text = match self.mode {
                 Mode::Editing { .. } => "To Interpreter Mode",
@@ -370,19 +387,25 @@ impl eframe::App for App {
                 running,
                 follow,
                 speed,
+                error_state,
                 ..
             } = &mut self.mode
             {
                 ui.horizontal(|ui| {
+                if error_state.is_some() {
+                    ui.disable();
+                }
+                ui.horizontal(|ui| {
                     if ui.button("step").clicked() {
-                        bf_state.step(&self.settings);
+                        Mode::step_befunge_inner(bf_state, running, error_state, &self.settings);
                     }
                     ui.checkbox(running, "play");
                     ui.checkbox(follow, "follow");
                 });
 
                 ui.horizontal(|ui| {
-                    ui.add(egui::Slider::new(speed, 1..=19).text("value"));
+                    ui.add(egui::Slider::new(speed, 1..=19).text("speed"));
+                });
                 });
             }
 
@@ -754,7 +777,7 @@ impl App {
                         } else if let Some(color) = get_color_of_bf_op(val) {
                             ui.put(
                                 pos,
-                                egui::Label::new(egui::RichText::new(val as char).color(color))
+                                egui::Label::new(RichText::new(val as char).color(color))
                                     .selectable(false),
                             )
                         } else {
@@ -806,7 +829,7 @@ impl App {
                                 .show(ui, |ui| {
                                     ui.add(
                                         egui::Label::new(
-                                            egui::RichText::new(str)
+                                            RichText::new(str)
                                                 .font(egui::FontId::monospace(font_size)),
                                         )
                                         .selectable(false),
@@ -1068,7 +1091,7 @@ impl App {
                 ui.label("Output:");
                 ui.add_space(2.0);
 
-                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.vertical(|ui| {
                     let text_style = TextStyle::Body;
 
                     ui.style_mut().spacing.scroll = ScrollStyle {

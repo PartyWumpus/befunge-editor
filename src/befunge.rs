@@ -42,6 +42,13 @@ pub struct FungeSpace {
     zero_page: Box<[i64; 100]>,
 }
 
+#[derive(Debug)]
+pub enum StepStatus {
+    Normal,
+    Breakpoint,
+    Error(&'static str),
+}
+
 #[derive(Clone)]
 pub enum Event {
     Close,
@@ -100,6 +107,10 @@ impl FungeSpace {
     }
 
     pub fn set(&mut self, pos: (i64, i64), val: i64) {
+        if pos.0 < 0 || pos.1 < 0 {
+            return;
+        };
+
         if pos.0 < 10 && pos.1 < 10 {
             self.zero_page[(pos.0 + pos.1 * 10) as usize] = val
         } else {
@@ -107,7 +118,7 @@ impl FungeSpace {
                 self.map.remove(&pos);
             }
             self.map.insert(pos, val);
-        }
+        };
     }
 
     pub fn get(&mut self, pos: (i64, i64)) -> Option<i64> {
@@ -258,10 +269,10 @@ impl State {
         };
     }
 
-    pub fn step(&mut self, settings: &Settings) -> bool {
-        let mut res = self.step_inner(settings);
+    pub fn step(&mut self, settings: &Settings) -> StepStatus {
+        let status = self.step_inner(settings);
         if self.breakpoints.contains(&self.position) {
-            res = true;
+            return StepStatus::Breakpoint;
         }
         // skip up to 100 spaces if not in string mode
         if settings.skip_spaces && !self.string_mode {
@@ -275,10 +286,10 @@ impl State {
                 }
             }
         };
-        res
+        status
     }
 
-    fn step_inner(&mut self, settings: &Settings) -> bool {
+    fn step_inner(&mut self, settings: &Settings) -> StepStatus {
         let op = self.map.get(self.position);
 
         if self.string_mode {
@@ -290,15 +301,17 @@ impl State {
             }
         } else if let Some(op) = op
             && let Ok(op) = op.try_into()
-            && self.do_op(op, settings)
         {
-            return true;
+            match self.do_op(op, settings) {
+                res @ (StepStatus::Breakpoint | StepStatus::Error(..)) => return res,
+                StepStatus::Normal => (),
+            }
         }
         self.step_position(settings);
-        false
+        StepStatus::Normal
     }
 
-    fn do_op(&mut self, op: u8, settings: &Settings) -> bool {
+    fn do_op(&mut self, op: u8, settings: &Settings) -> StepStatus {
         match op {
             b'"' => self.string_mode = true,
 
@@ -323,6 +336,9 @@ impl State {
             b'/' => {
                 let a = self.pop();
                 let b = self.pop();
+                if a == 0 {
+                    return StepStatus::Error("Attempt to divide by zero")
+                }
                 self.stack.push(b / a);
             }
             b'%' => {
@@ -428,7 +444,7 @@ impl State {
                 // FIXME TODO oh my god use a vecdqueue i beg
                 let mut itr = self.input_buffer.chars();
                 match itr.next() {
-                    None => return true,
+                    None => return StepStatus::Breakpoint,
                     Some(chr) => {
                         self.stack.push(chr as i64);
                         self.input_buffer = itr.as_str().into();
@@ -437,7 +453,7 @@ impl State {
             }
 
             // halt is dealt with higher up
-            b'@' => return true,
+            b'@' => return StepStatus::Breakpoint,
 
             // -- IO output
             b'.' => {
@@ -529,9 +545,9 @@ impl State {
             // noop
             b' ' => (),
 
-            _ => panic!("invalid operation"),
+            _ => return StepStatus::Error("Invalid operation"),
         };
-        false
+        StepStatus::Normal
     }
 }
 
