@@ -1,7 +1,8 @@
 use coarsetime::{Duration, Instant};
 use core::f32;
-use egui::ahash::HashMap;
-use egui::{FontId, Id, Modal, RichText, StrokeKind};
+use egui::scroll_area::ScrollBarVisibility;
+use egui::style::ScrollStyle;
+use egui::{FontId, Id, Modal, RichText, ScrollArea, StrokeKind, TextStyle};
 use phf::phf_map;
 use std::future::Future;
 use std::ops::Range;
@@ -14,7 +15,7 @@ use crate::befunge::{Event, FungeSpace, get_color_of_bf_op};
 
 static PRESETS: phf::Map<&'static str, &'static str> = phf_map! {
     "Addition" => "5 5 + .",
-    "smile" =>r#"v
+    "Smile" =>r#"v
 
 >        92+8         "~"v
          vsp0         0*2<
@@ -331,7 +332,7 @@ impl eframe::App for App {
         });
 
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 powered_by_egui_and_eframe(ui);
                 ui.add(egui::github_link_file!(
                     "https://github.com/PartyWumpus/befunge-editor/blob/main/",
@@ -859,7 +860,7 @@ impl App {
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::menu::bar(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             let is_web = cfg!(target_arch = "wasm32");
             ui.menu_button("File", |ui| {
                 if ui.button("New File").clicked() {
@@ -1049,14 +1050,6 @@ impl App {
             }
 
             ui.label("Stack:");
-            egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .show(ui, |ui| {
-                    for value in &bf_state.stack {
-                        ui.label(value.to_string());
-                    }
-                });
-
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(2.0);
                 // TODO: as part of making this use a vecdeque<char>
@@ -1073,6 +1066,48 @@ impl App {
                 ui.add_space(2.0);
                 ui.label(&bf_state.output);
                 ui.label("Output:");
+                ui.add_space(2.0);
+
+                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    let text_style = TextStyle::Body;
+
+                    ui.style_mut().spacing.scroll = ScrollStyle {
+                        floating: true,
+                        bar_width: 8.0,
+                        floating_width: 8.0,
+                        floating_allocated_width: 6.0,
+                        foreground_color: false,
+
+                        dormant_background_opacity: 0.4,
+                        dormant_handle_opacity: 0.4,
+
+                        active_background_opacity: 0.6,
+                        active_handle_opacity: 0.6,
+
+                        interact_background_opacity: 0.8,
+                        interact_handle_opacity: 0.8,
+                        ..ScrollStyle::solid()
+                    };
+                    ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+                        .show_rows(
+                            ui,
+                            ui.text_style_height(&text_style),
+                            bf_state.stack.len(),
+                            |ui, row_range| {
+                                let painter = ui.painter();
+                                painter.rect_filled(
+                                    ui.clip_rect(),
+                                    5.0,
+                                    ui.visuals().faint_bg_color,
+                                );
+                                for value in row_range {
+                                    ui.label(bf_state.stack[value].to_string());
+                                }
+                            },
+                        );
+                });
             });
         }
     }
