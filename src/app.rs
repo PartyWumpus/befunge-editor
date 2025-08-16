@@ -1,4 +1,3 @@
-use clap::error;
 use coarsetime::{Duration, Instant};
 use core::f32;
 use egui::scroll_area::ScrollBarVisibility;
