@@ -6,6 +6,7 @@ use egui::{
     ahash::{HashSet, HashSetExt},
 };
 use std::{collections::VecDeque, iter};
+use thiserror::Error;
 
 use egui::ahash::HashMap;
 
@@ -25,6 +26,17 @@ pub enum Direction {
     West,
 }
 
+impl Direction {
+    pub fn reverse(&self) -> Self {
+        match self {
+            Self::North => Self::South,
+            Self::South => Self::North,
+            Self::East => Self::West,
+            Self::West => Self::East,
+        }
+    }
+}
+
 /*impl Distribution<Direction> for StandardUniform {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Direction {
         match rng.random_range(0..=3) {
@@ -40,13 +52,24 @@ pub enum Direction {
 pub struct FungeSpace {
     map: HashMap<(i64, i64), i64>,
     zero_page: Box<[i64; 100]>,
+    max_size: (i64, i64),
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum Error {
+    #[error("Invalid operation")]
+    InvalidOperation,
+    #[error("Division by zero")]
+    DivisionByZero,
+    #[error("Out of bounds graphics operation")]
+    OutOfBoundsGraphics,
 }
 
 #[derive(Debug)]
 pub enum StepStatus {
     Normal,
     Breakpoint,
-    Error(&'static str),
+    Error(Error),
 }
 
 #[derive(Clone)]
@@ -68,18 +91,19 @@ pub struct Graphics {
 #[derive(Clone)]
 pub struct State {
     pub map: FungeSpace,
+    pub string_mode: bool,
     pub position: (i64, i64),
     pub direction: Direction,
     pub pos_history: HashMap<(i64, i64), Instant>,
     pub get_history: HashMap<(i64, i64), Instant>,
     pub put_history: HashMap<(i64, i64), Instant>,
     pub stack: Vec<i64>,
-    pub string_mode: bool,
     pub output: String,
     pub graphics: Option<Graphics>,
     pub breakpoints: HashSet<(i64, i64)>,
     //pub input_buffer: VecDeque<i64>,
     pub input_buffer: String,
+    //pub input_number: i64,
 }
 
 impl Default for FungeSpace {
@@ -93,6 +117,7 @@ impl FungeSpace {
         Self {
             map: HashMap::default(),
             zero_page: Box::new([b' '.into(); 100]),
+            max_size: (100, 100),
         }
     }
 
@@ -118,6 +143,13 @@ impl FungeSpace {
                 self.map.remove(&pos);
             }
             self.map.insert(pos, val);
+
+            if pos.0 > self.max_size.0 {
+                self.max_size.0 = pos.0
+            }
+            if pos.1 > self.max_size.1 {
+                self.max_size.1 = pos.1
+            }
         };
     }
 
@@ -193,10 +225,14 @@ impl Graphics {
         }
     }
 
-    pub fn pixel(&mut self, x: usize, y: usize) {
+    pub fn pixel(&mut self, x: usize, y: usize) -> StepStatus {
+        if x >= self.size.0 || y >= self.size.1 {
+            return StepStatus::Error(Error::OutOfBoundsGraphics);
+        }
         // FIXME: error here on out of bounds
         let index = x + y * self.size.0;
         self.texture[index] = self.current_color;
+        StepStatus::Normal
     }
 }
 
@@ -216,6 +252,7 @@ impl Default for State {
             breakpoints: HashSet::new(),
             //input_buffer: VecDeque::new(),
             input_buffer: String::new(),
+            //input_number: i64,
         }
     }
 }
@@ -236,7 +273,7 @@ impl State {
         }
     }
 
-    fn step_position(&mut self, settings: &Settings) {
+    pub fn step_position(&mut self, settings: &Settings) {
         self.step_position_inner();
         let (x, y) = self.position;
         if settings.pos_history.0 {
@@ -260,13 +297,19 @@ impl State {
         }
 
         if self.position.0 < 0 {
-            self.position.0 += i64::MAX;
-            self.position.0 += 1;
+            self.position.0 = self.map.max_size.0 + 1;
         };
         if self.position.1 < 0 {
-            self.position.1 += i64::MAX;
-            self.position.1 += 1;
+            self.position.1 = self.map.max_size.1 + 1;
         };
+
+        if self.position.0 > self.map.max_size.0 + 1 {
+            self.position.0 = 0
+        }
+
+        if self.position.1 > self.map.max_size.1 + 1 {
+            self.position.1 = 0
+        }
     }
 
     pub fn step(&mut self, settings: &Settings) -> StepStatus {
@@ -337,13 +380,16 @@ impl State {
                 let a = self.pop();
                 let b = self.pop();
                 if a == 0 {
-                    return StepStatus::Error("Attempt to divide by zero")
+                    return StepStatus::Error(Error::DivisionByZero);
                 }
                 self.stack.push(b / a);
             }
             b'%' => {
                 let a = self.pop();
                 let b = self.pop();
+                if a == 0 {
+                    return StepStatus::Error(Error::DivisionByZero);
+                }
                 self.stack.push(b % a);
             }
             b'`' => {
@@ -437,7 +483,7 @@ impl State {
 
             // input
             b'&' => {
-                todo!()
+                //todo!()
             }
 
             b'~' => {
@@ -495,7 +541,7 @@ impl State {
                     let y: usize = self.stack.pop().unwrap_or(0).try_into().unwrap();
                     let x: usize = self.stack.pop().unwrap_or(0).try_into().unwrap();
 
-                    graphics.pixel(x, y);
+                    return graphics.pixel(x, y);
                 }
             }
 
@@ -517,6 +563,14 @@ impl State {
 
                     let y2: i32 = self.stack.pop().unwrap_or(0).try_into().unwrap();
                     let x2: i32 = self.stack.pop().unwrap_or(0).try_into().unwrap();
+
+                    if x1 >= graphics.size.0 as i32
+                        || y1 >= graphics.size.1 as i32
+                        || x2 >= graphics.size.0 as i32
+                        || y2 >= graphics.size.1 as i32
+                    {
+                        return StepStatus::Error(Error::OutOfBoundsGraphics);
+                    }
 
                     // TODO: use clippin n stuff
                     for (x, y) in AnyOctant::<i32>::new((x1, y1), (x2, y2)) {
@@ -545,7 +599,7 @@ impl State {
             // noop
             b' ' => (),
 
-            _ => return StepStatus::Error("Invalid operation"),
+            _ => return StepStatus::Error(Error::InvalidOperation),
         };
         StepStatus::Normal
     }

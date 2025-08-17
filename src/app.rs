@@ -10,8 +10,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
-use crate::BefungeState;
 use crate::befunge::{Event, FungeSpace, StepStatus, get_color_of_bf_op};
+use crate::{BefungeState, befunge};
 
 static PRESETS: phf::Map<&'static str, &'static str> = phf_map! {
     "Addition" => "5 5 + .",
@@ -68,8 +68,15 @@ enum Mode {
         running: bool,
         follow: bool,
         speed: u8,
-        error_state: Option<&'static str>,
+        error_state: Option<befunge::Error>,
     },
+}
+
+#[derive(serde::Deserialize, serde::Serialize, PartialEq)]
+pub enum InvalidOperationBehaviour {
+    Reflect,
+    Halt,
+    Ignore,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -79,6 +86,7 @@ pub struct Settings {
     pub put_history: (bool, [u8; 3]),
     pub skip_spaces: bool,
     pub render_unicode: bool,
+    pub invalid_operation_behaviour: InvalidOperationBehaviour,
 }
 
 impl Default for Settings {
@@ -89,6 +97,7 @@ impl Default for Settings {
             put_history: (true, [0, 255, 0]),
             skip_spaces: false,
             render_unicode: true,
+            invalid_operation_behaviour: InvalidOperationBehaviour::Halt,
         }
     }
 }
@@ -173,7 +182,7 @@ impl Mode {
     fn step_befunge_inner(
         bf_state: &mut BefungeState,
         running: &mut bool,
-        error_state: &mut Option<&'static str>,
+        error_state: &mut Option<befunge::Error>,
         settings: &Settings,
     ) -> bool {
         let step_state = bf_state.step(settings);
@@ -184,9 +193,23 @@ impl Mode {
                 true
             }
             StepStatus::Error(error) => {
-                *error_state = Some(error);
-                true
-            },
+                use InvalidOperationBehaviour as IOpBehav;
+                match settings.invalid_operation_behaviour {
+                    IOpBehav::Reflect => {
+                        bf_state.direction = bf_state.direction.reverse();
+                        bf_state.step_position(settings);
+                        false
+                    }
+                    IOpBehav::Halt => {
+                        *error_state = Some(error);
+                        true
+                    }
+                    IOpBehav::Ignore => {
+                        bf_state.step_position(settings);
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -218,14 +241,24 @@ impl Mode {
                         }
                         6..=9 => {
                             for _ in 0..=*speed - 6 {
-                                if Self::step_befunge_inner(bf_state, running, error_state, settings) {
+                                if Self::step_befunge_inner(
+                                    bf_state,
+                                    running,
+                                    error_state,
+                                    settings,
+                                ) {
                                     return;
                                 };
                             }
                         }
                         10..=15 => {
                             for _ in 0..=2_usize.pow(*speed as u32 - 8) {
-                                if Self::step_befunge_inner(bf_state, running, error_state, settings) {
+                                if Self::step_befunge_inner(
+                                    bf_state,
+                                    running,
+                                    error_state,
+                                    settings,
+                                ) {
                                     return;
                                 };
                             }
@@ -234,7 +267,12 @@ impl Mode {
                             let now = Instant::now();
                             loop {
                                 for _ in 0..=10000 {
-                                    if Self::step_befunge_inner(bf_state, running, error_state, settings) {
+                                    if Self::step_befunge_inner(
+                                        bf_state,
+                                        running,
+                                        error_state,
+                                        settings,
+                                    ) {
                                         return;
                                     }
                                 }
@@ -368,8 +406,12 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("befunge editor");
-                if let Mode::Playing{error_state: Some(error), .. } = self.mode {
-                    ui.label(RichText::new(error).color(Color32::RED));
+                if let Mode::Playing {
+                    error_state: Some(error),
+                    ..
+                } = &self.mode
+                {
+                    ui.label(RichText::new(error.to_string()).color(Color32::RED));
                 };
             });
 
@@ -391,20 +433,25 @@ impl eframe::App for App {
             } = &mut self.mode
             {
                 ui.horizontal(|ui| {
-                if error_state.is_some() {
-                    ui.disable();
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("step").clicked() {
-                        Mode::step_befunge_inner(bf_state, running, error_state, &self.settings);
+                    if error_state.is_some() {
+                        ui.disable();
                     }
-                    ui.checkbox(running, "play");
-                    ui.checkbox(follow, "follow");
-                });
+                    ui.horizontal(|ui| {
+                        if ui.button("step").clicked() {
+                            Mode::step_befunge_inner(
+                                bf_state,
+                                running,
+                                error_state,
+                                &self.settings,
+                            );
+                        }
+                        ui.checkbox(running, "play");
+                        ui.checkbox(follow, "follow");
+                    });
 
-                ui.horizontal(|ui| {
-                    ui.add(egui::Slider::new(speed, 1..=19).text("speed"));
-                });
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Slider::new(speed, 1..=19).text("speed"));
+                    });
                 });
             }
 
@@ -754,6 +801,10 @@ impl App {
                 for (pos, val) in map.entries() {
                     let pos = recter(pos, self.scene_offset);
 
+                    if !clip_rect.intersects(pos) {
+                        continue;
+                    }
+
                     if let Ok(val) = TryInto::<u8>::try_into(val)
                         && val <= b'~'
                     {
@@ -836,8 +887,7 @@ impl App {
                                 })
                                 .response
                         })
-                    }
-                    .on_hover_text(val.to_string());
+                    };
                 }
             })
             .response;
@@ -1003,6 +1053,24 @@ impl App {
             ui.menu_button("Settings", |ui| {
                 ui.checkbox(&mut self.settings.pos_history.0, "Track position history");
                 ui.checkbox(&mut self.settings.skip_spaces, "Skip spaces");
+
+                ui.menu_button("Invalid operation behaviour", |ui| {
+                    ui.radio_value(
+                        &mut self.settings.invalid_operation_behaviour,
+                        InvalidOperationBehaviour::Halt,
+                        "Halt",
+                    );
+                    ui.radio_value(
+                        &mut self.settings.invalid_operation_behaviour,
+                        InvalidOperationBehaviour::Reflect,
+                        "Reflect",
+                    );
+                    ui.radio_value(
+                        &mut self.settings.invalid_operation_behaviour,
+                        InvalidOperationBehaviour::Ignore,
+                        "Ignore",
+                    );
+                });
                 ui.checkbox(
                     &mut self.settings.render_unicode,
                     "Display non-ascii characters",

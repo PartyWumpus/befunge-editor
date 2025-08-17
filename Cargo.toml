@@ -29,6 +29,7 @@ coarsetime = "0.1.36"
 rfd = "0.15.3"
 futures = "0.3.31"
 phf = { version = "0.12.1", features = ["macros"] }
+thiserror = "2.0.15"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
