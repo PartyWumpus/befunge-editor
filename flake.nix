@@ -18,7 +18,6 @@
             # Rust
             (rust-bin.fromRustupToolchainFile ./rust-toolchain)
             trunk
-            lld_19
 
             # misc. libraries
             openssl

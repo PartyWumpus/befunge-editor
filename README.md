@@ -24,3 +24,5 @@ To run: `cargo run --release`
 - Breakpoints that pause on value change
 - Some of the preprocessor things from befunexec (break & watch, but not replace)
 - An easier way to move the screen large distances. Possibly a "minimap" style thing?
+- Undo in editor mode
+- Step backwards in play mode

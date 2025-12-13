@@ -63,6 +63,8 @@ pub enum Error {
     DivisionByZero,
     #[error("Out of bounds graphics operation")]
     OutOfBoundsGraphics,
+    #[error("& is not yet supported")]
+    TodoAmpersand,
 }
 
 #[derive(Debug)]
@@ -483,7 +485,7 @@ impl State {
 
             // input
             b'&' => {
-                //todo!()
+                return StepStatus::Error(Error::TodoAmpersand)
             }
 
             b'~' => {
@@ -524,14 +526,17 @@ impl State {
             b'f' => {
                 // configure color
                 if let Some(graphics) = &mut self.graphics {
-                    let b = self.stack.pop().unwrap_or(0);
-                    let g = self.stack.pop().unwrap_or(0);
-                    let r = self.stack.pop().unwrap_or(0);
-                    graphics.current_color = Color32::from_rgb(
-                        b.try_into().unwrap(),
-                        g.try_into().unwrap(),
-                        r.try_into().unwrap(),
-                    );
+                    let r = self.stack.pop().unwrap_or(0).try_into();
+                    let g = self.stack.pop().unwrap_or(0).try_into();
+                    let b = self.stack.pop().unwrap_or(0).try_into();
+                    if let Ok(r) = r
+                        && let Ok(g) = g
+                        && let Ok(b) = b
+                    {
+                        graphics.current_color = Color32::from_rgb(r, g, b);
+                    } else {
+                        return StepStatus::Error(Error::OutOfBoundsGraphics);
+                    }
                 }
             }
 
@@ -588,7 +593,7 @@ impl State {
                             Event::Close => self.stack.extend([1]),
                             //Event::KeyDown(key) => self.stack.extend([key,2]),
                             //Event::KeyUp(key) => self.stack.extend([key,3]),
-                            Event::MouseClick(x, y) => self.stack.extend([y, x, 4]),
+                            Event::MouseClick(x, y) => self.stack.extend([x, y, 4]),
                         }
                     } else {
                         self.stack.push(0);

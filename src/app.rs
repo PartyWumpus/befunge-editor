@@ -552,7 +552,7 @@ impl App {
             ..
         } = &self.mode
         {
-            self.scene_offset = bf_state.position.clone();
+            self.scene_offset = bf_state.position;
             self.scene_rect.set_center(poss((0.5, 0.5)));
             // disables panning, TODO: disable scrolling
             scene = scene.sense(Sense::HOVER);
@@ -1086,7 +1086,10 @@ impl App {
     }
 
     fn info_panel(&mut self, ui: &mut egui::Ui) {
-        if let Mode::Playing { bf_state, .. } = &mut self.mode {
+        if let Mode::Playing {
+            bf_state, running, ..
+        } = &mut self.mode
+        {
             if let Some(graphics) = &mut bf_state.graphics {
                 ui.label("Graphics:");
                 self.texture.set(
@@ -1150,7 +1153,10 @@ impl App {
                 // paused ontop of a `~` while there was input
                 // and then deleted the input, and then started typing
                 // but like ¯\_(ツ)_/¯ there aren't any users
-                ui.text_edit_singleline(&mut bf_state.input_buffer);
+                let resp = ui.text_edit_singleline(&mut bf_state.input_buffer);
+                if resp.changed() {
+                    *running = true
+                }
                 ui.label("Input:");
 
                 ui.add_space(2.0);
