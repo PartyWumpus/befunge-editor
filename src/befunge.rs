@@ -484,9 +484,7 @@ impl State {
             }
 
             // input
-            b'&' => {
-                return StepStatus::Error(Error::TodoAmpersand)
-            }
+            b'&' => return StepStatus::Error(Error::TodoAmpersand),
 
             b'~' => {
                 // FIXME TODO oh my god use a vecdqueue i beg

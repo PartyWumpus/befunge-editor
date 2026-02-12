@@ -214,6 +214,7 @@ impl Mode {
     }
 
     fn step_befunge(&mut self, ctx: &egui::Context, settings: &Settings) {
+        puffin::profile_function!();
         match self {
             Mode::Editing { .. } => (),
             Mode::Playing {
@@ -350,6 +351,11 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        puffin::profile_function!();
+        puffin::GlobalProfiler::lock().new_frame();
+
+        puffin_egui::show_viewport_if_enabled(ctx);
+
         let dur = std::time::Duration::from_millis(5000);
         if let Mode::Playing {
             ref mut time_since_step,
@@ -374,13 +380,12 @@ impl eframe::App for App {
             }
         }
 
-        Instant::update();
-
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             self.menu_bar(ui, ctx);
         });
 
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
+            puffin::profile_scope!("bottom panel");
             egui::MenuBar::new().ui(ui, |ui| {
                 powered_by_egui_and_eframe(ui);
                 ui.add(egui::github_link_file!(
@@ -404,6 +409,7 @@ impl eframe::App for App {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            puffin::profile_scope!("central panel");
             ui.horizontal(|ui| {
                 ui.heading("befunge editor");
                 if let Mode::Playing {
@@ -469,6 +475,7 @@ impl eframe::App for App {
 
 impl App {
     fn befunge_input(&mut self, ui: &mut egui::Ui) {
+        puffin::profile_function!();
         if let Mode::Editing {
             cursor_state,
             fungespace,
@@ -542,6 +549,7 @@ impl App {
     }
 
     fn befunge_scene(&mut self, ui: &mut egui::Ui) {
+        puffin::profile_function!();
         let mut scene = Scene::new()
             .max_inner_size([f32::INFINITY, f32::INFINITY])
             .zoom_range(0.01..=5.0);
@@ -588,306 +596,343 @@ impl App {
                 let clip_rect = painter.clip_rect();
 
                 // Grid dots
-                if clip_rect.height() < 2500.0 {
-                    let mut y = f32::max(
-                        (clip_rect.top() / 17.0).round() * 17.0,
-                        17.0 - (self.scene_offset.1 as f32 * 17.0),
-                    );
-                    loop {
-                        let mut x = f32::max(
-                            (clip_rect.left() / 13.0).round() * 13.0,
-                            13.0 - (self.scene_offset.0 as f32 * 13.0),
+                {
+                    puffin::profile_scope!("grid dots");
+                    if clip_rect.height() < 2500.0 {
+                        let mut y = f32::max(
+                            (clip_rect.top() / 17.0).round() * 17.0,
+                            17.0 - (self.scene_offset.1 as f32 * 17.0),
                         );
                         loop {
-                            painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
-                            if x > f32::min(
-                                clip_rect.right(),
-                                (i64::MAX - i64::max(self.scene_offset.0, 0) - 1) as f32 * 13.0,
+                            let mut x = f32::max(
+                                (clip_rect.left() / 13.0).round() * 13.0,
+                                13.0 - (self.scene_offset.0 as f32 * 13.0),
+                            );
+                            loop {
+                                painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
+                                if x > f32::min(
+                                    clip_rect.right(),
+                                    (i64::MAX - i64::max(self.scene_offset.0, 0) - 1) as f32 * 13.0,
+                                ) {
+                                    break;
+                                };
+                                x += 13.0;
+                            }
+                            if y > f32::min(
+                                clip_rect.bottom(),
+                                (i64::MAX - i64::max(self.scene_offset.1, 0) - 1) as f32 * 17.0,
                             ) {
                                 break;
                             };
-                            x += 13.0;
+                            y += 17.0;
                         }
-                        if y > f32::min(
-                            clip_rect.bottom(),
-                            (i64::MAX - i64::max(self.scene_offset.1, 0) - 1) as f32 * 17.0,
-                        ) {
-                            break;
-                        };
-                        y += 17.0;
                     }
                 }
 
                 // Border lines
-                // Top line
-                painter.line_segment(
-                    [
-                        Pos2::new(
-                            f32::max(clip_rect.left(), -1.0 - (self.scene_offset.0 as f32) * 13.0),
-                            -0.5 - (self.scene_offset.1 as f32) * 17.0,
-                        ),
-                        Pos2::new(
-                            f32::min(
-                                clip_rect.right(),
-                                ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0) * 13.0,
+                {
+                    puffin::profile_scope!("border");
+                    // Top line
+                    painter.line_segment(
+                        [
+                            Pos2::new(
+                                f32::max(
+                                    clip_rect.left(),
+                                    -1.0 - (self.scene_offset.0 as f32) * 13.0,
+                                ),
+                                -0.5 - (self.scene_offset.1 as f32) * 17.0,
                             ),
-                            -0.5 - (self.scene_offset.1 as f32) * 17.0,
-                        ),
-                    ],
-                    Stroke::new(1.0, Color32::from_gray(50)),
-                );
-
-                // Bottom line
-                painter.line_segment(
-                    [
-                        Pos2::new(
-                            f32::max(clip_rect.left(), -1.0 - (self.scene_offset.0 as f32) * 13.0),
-                            0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
-                        ),
-                        Pos2::new(
-                            f32::min(
-                                clip_rect.right(),
-                                ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0) * 13.0,
+                            Pos2::new(
+                                f32::min(
+                                    clip_rect.right(),
+                                    ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0)
+                                        * 13.0,
+                                ),
+                                -0.5 - (self.scene_offset.1 as f32) * 17.0,
                             ),
-                            0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
-                        ),
-                    ],
-                    Stroke::new(1.0, Color32::from_gray(50)),
-                );
+                        ],
+                        Stroke::new(1.0, Color32::from_gray(50)),
+                    );
 
-                // Left line
-                painter.line_segment(
-                    [
-                        Pos2::new(
-                            -0.5 - (self.scene_offset.0 as f32) * 13.0,
-                            f32::max(clip_rect.top(), -1.0 - (self.scene_offset.1 as f32) * 17.0),
-                        ),
-                        Pos2::new(
-                            -0.5 - (self.scene_offset.0 as f32) * 13.0,
-                            f32::min(
-                                clip_rect.bottom(),
-                                ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0) * 17.0,
+                    // Bottom line
+                    painter.line_segment(
+                        [
+                            Pos2::new(
+                                f32::max(
+                                    clip_rect.left(),
+                                    -1.0 - (self.scene_offset.0 as f32) * 13.0,
+                                ),
+                                0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
                             ),
-                        ),
-                    ],
-                    Stroke::new(1.0, Color32::from_gray(50)),
-                );
-
-                // Right line
-                painter.line_segment(
-                    [
-                        Pos2::new(
-                            0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
-                            f32::max(clip_rect.top(), -1.0 - (self.scene_offset.1 as f32) * 17.0),
-                        ),
-                        Pos2::new(
-                            0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
-                            f32::min(
-                                clip_rect.bottom(),
-                                ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0) * 17.0,
+                            Pos2::new(
+                                f32::min(
+                                    clip_rect.right(),
+                                    ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0)
+                                        * 13.0,
+                                ),
+                                0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
                             ),
-                        ),
-                    ],
-                    Stroke::new(1.0, Color32::from_gray(50)),
-                );
+                        ],
+                        Stroke::new(1.0, Color32::from_gray(50)),
+                    );
 
-                match &mut self.mode {
-                    Mode::Playing { bf_state, .. } => {
-                        // TODO: move this somewhere more sensible
-                        bf_state
-                            .pos_history
-                            .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+                    // Left line
+                    painter.line_segment(
+                        [
+                            Pos2::new(
+                                -0.5 - (self.scene_offset.0 as f32) * 13.0,
+                                f32::max(
+                                    clip_rect.top(),
+                                    -1.0 - (self.scene_offset.1 as f32) * 17.0,
+                                ),
+                            ),
+                            Pos2::new(
+                                -0.5 - (self.scene_offset.0 as f32) * 13.0,
+                                f32::min(
+                                    clip_rect.bottom(),
+                                    ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0)
+                                        * 17.0,
+                                ),
+                            ),
+                        ],
+                        Stroke::new(1.0, Color32::from_gray(50)),
+                    );
 
-                        bf_state
-                            .put_history
-                            .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+                    // Right line
+                    painter.line_segment(
+                        [
+                            Pos2::new(
+                                0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
+                                f32::max(
+                                    clip_rect.top(),
+                                    -1.0 - (self.scene_offset.1 as f32) * 17.0,
+                                ),
+                            ),
+                            Pos2::new(
+                                0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
+                                f32::min(
+                                    clip_rect.bottom(),
+                                    ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0)
+                                        * 17.0,
+                                ),
+                            ),
+                        ],
+                        Stroke::new(1.0, Color32::from_gray(50)),
+                    );
+                }
 
-                        bf_state
-                            .get_history
-                            .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+                {
+                    puffin::profile_scope!("history heatmap");
+                    match &mut self.mode {
+                        Mode::Playing { bf_state, .. } => {
+                            // TODO: move this somewhere more sensible
+                            bf_state
+                                .pos_history
+                                .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
-                        painter.rect(
-                            recter(bf_state.position, self.scene_offset),
-                            0.0,
-                            Color32::PURPLE,
-                            Stroke::NONE,
-                            StrokeKind::Outside,
-                        );
-                        for (pos, instant) in &bf_state.pos_history {
-                            let rect = recter(*pos, self.scene_offset);
-                            let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                            let mut mult = f32::log2(5.0 - time) - 1.322 - 0.3;
-                            if mult < 0.0 {
-                                mult = 0.0
-                            }
+                            bf_state
+                                .put_history
+                                .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
-                            let [r, g, b] = self.settings.pos_history.1;
+                            bf_state
+                                .get_history
+                                .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+
                             painter.rect(
-                                rect,
+                                recter(bf_state.position, self.scene_offset),
                                 0.0,
-                                Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                Color32::PURPLE,
                                 Stroke::NONE,
                                 StrokeKind::Outside,
                             );
-                        }
+                            for (pos, instant) in &bf_state.pos_history {
+                                let rect = recter(*pos, self.scene_offset);
+                                let time = (instant.elapsed().as_millis() as f32) / 1000.0;
+                                let mut mult = f32::log2(5.0 - time) - 1.322 - 0.3;
+                                if mult < 0.0 {
+                                    mult = 0.0
+                                }
 
-                        for (pos, instant) in &bf_state.put_history {
-                            let rect = recter(*pos, self.scene_offset);
-                            let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                            let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
-                            if mult < 0.0 {
-                                mult = 0.0
+                                let [r, g, b] = self.settings.pos_history.1;
+                                painter.rect(
+                                    rect,
+                                    0.0,
+                                    Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                    Stroke::NONE,
+                                    StrokeKind::Outside,
+                                );
                             }
 
-                            let [r, g, b] = self.settings.put_history.1;
-                            painter.rect(
-                                rect,
-                                0.0,
-                                Color32::from_rgb(r, g, b).gamma_multiply(mult),
-                                Stroke::NONE,
-                                StrokeKind::Outside,
-                            );
-                        }
+                            for (pos, instant) in &bf_state.put_history {
+                                let rect = recter(*pos, self.scene_offset);
+                                let time = (instant.elapsed().as_millis() as f32) / 1000.0;
+                                let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
+                                if mult < 0.0 {
+                                    mult = 0.0
+                                }
 
-                        for (pos, instant) in &bf_state.get_history {
-                            let rect = recter(*pos, self.scene_offset);
-                            let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                            let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
-                            if mult < 0.0 {
-                                mult = 0.0
+                                let [r, g, b] = self.settings.put_history.1;
+                                painter.rect(
+                                    rect,
+                                    0.0,
+                                    Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                    Stroke::NONE,
+                                    StrokeKind::Outside,
+                                );
                             }
 
-                            let [r, g, b] = self.settings.get_history.1;
-                            painter.rect(
-                                rect,
-                                0.0,
-                                Color32::from_rgb(r, g, b).gamma_multiply(mult),
-                                Stroke::NONE,
-                                StrokeKind::Outside,
-                            );
+                            for (pos, instant) in &bf_state.get_history {
+                                let rect = recter(*pos, self.scene_offset);
+                                let time = (instant.elapsed().as_millis() as f32) / 1000.0;
+                                let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
+                                if mult < 0.0 {
+                                    mult = 0.0
+                                }
+
+                                let [r, g, b] = self.settings.get_history.1;
+                                painter.rect(
+                                    rect,
+                                    0.0,
+                                    Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                    Stroke::NONE,
+                                    StrokeKind::Outside,
+                                );
+                            }
+
+                            for pos in &bf_state.breakpoints {
+                                let rect = recter(*pos, self.scene_offset);
+
+                                painter.rect(
+                                    rect,
+                                    0.0,
+                                    Color32::TRANSPARENT,
+                                    Stroke::new(2.0, Color32::GREEN),
+                                    StrokeKind::Inside,
+                                );
+                            }
                         }
-
-                        for pos in &bf_state.breakpoints {
-                            let rect = recter(*pos, self.scene_offset);
-
+                        Mode::Editing { cursor_state, .. } => {
                             painter.rect(
-                                rect,
+                                recter(cursor_state.location, self.scene_offset),
                                 0.0,
-                                Color32::TRANSPARENT,
-                                Stroke::new(2.0, Color32::GREEN),
+                                if cursor_state.string_mode {
+                                    Color32::LIGHT_GREEN
+                                } else {
+                                    Color32::LIGHT_BLUE
+                                },
+                                Stroke::new(0.25, Color32::from_gray(90)),
                                 StrokeKind::Inside,
                             );
                         }
-                    }
-                    Mode::Editing { cursor_state, .. } => {
-                        painter.rect(
-                            recter(cursor_state.location, self.scene_offset),
-                            0.0,
-                            if cursor_state.string_mode {
-                                Color32::LIGHT_GREEN
+                    };
+                }
+
+                {
+                    puffin::profile_scope!("chars");
+                    let map = match &mut self.mode {
+                        Mode::Playing { bf_state, .. } => &mut bf_state.map,
+                        Mode::Editing { fungespace, .. } => fungespace,
+                    };
+                    for (pos, val) in map.entries() {
+                        let pos = recter(pos, self.scene_offset);
+                    
+
+                        if !clip_rect.intersects(pos) {
+                            continue;
+                        }
+
+
+                        puffin::profile_scope!("char");
+                        
+                        if let Ok(val) = TryInto::<u8>::try_into(val)
+                            && val <= b'~'
+                        {
+                            if val < b' ' {
+                                puffin::profile_scope!("char boxed");
+                                ui.put(pos, |ui: &mut Ui| {
+                                    Frame::default()
+                                        .stroke(Stroke::new(0.5, Color32::GRAY))
+                                        .show(ui, |ui| {
+                                            ui.add(
+                                                egui::Label::new(String::from(match val {
+                                                    0..=9 => val + b'0',
+                                                    10.. => val - 10 + b'A',
+                                                }
+                                                    as char))
+                                                .selectable(false),
+                                            )
+                                        })
+                                        .response
+                                })
+                            } else if let Some(color) = get_color_of_bf_op(val) {
+                                puffin::profile_scope!("char colored");
+                                ui.put(
+                                    pos,
+                                    egui::Label::new(RichText::new(val as char).color(color))
+                                        .selectable(false),
+                                )
                             } else {
-                                Color32::LIGHT_BLUE
-                            },
-                            Stroke::new(0.25, Color32::from_gray(90)),
-                            StrokeKind::Inside,
-                        );
-                    }
-                };
-
-                let map = match &mut self.mode {
-                    Mode::Playing { bf_state, .. } => &mut bf_state.map,
-                    Mode::Editing { fungespace, .. } => fungespace,
-                };
-                for (pos, val) in map.entries() {
-                    let pos = recter(pos, self.scene_offset);
-
-                    if !clip_rect.intersects(pos) {
-                        continue;
-                    }
-
-                    if let Ok(val) = TryInto::<u8>::try_into(val)
-                        && val <= b'~'
-                    {
-                        if val < b' ' {
+                                puffin::profile_scope!("char simple");
+                                ui.put(
+                                    pos,
+                                    egui::Label::new(String::from(val as char)).selectable(false),
+                                )
+                            }
+                        } else if self.settings.render_unicode
+                            && let Ok(val) = val.try_into()
+                            && let Some(val) = char::from_u32(val)
+                            && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
+                        {
+                            puffin::profile_scope!("char unicode");
+                            ui.put(pos, egui::Label::new(String::from(val)).selectable(false))
+                        } else {
+                            puffin::profile_scope!("char unknown");
                             ui.put(pos, |ui: &mut Ui| {
+                                // this is not great
+                                // i'm not really sure what the best way to do this would be
+                                let str = format!("{val:X}");
+                                let n = str.len();
+                                let font_size = match n {
+                                    ..=1 => 16.0,
+                                    2 => 8.0,
+                                    3..=6 => 6.0,
+                                    7..16 => 4.0,
+                                    16.. => 3.2,
+                                };
+
+                                let ranges: &[Range<usize>] = match n {
+                                    0..4 => &[0..n],
+                                    4 => &[0..2, 2..n],
+                                    5 | 6 => &[0..3, 3..n],
+                                    7 | 8 | 9 => &[0..3, 3..6, 6..n],
+                                    10 => &[0..4, 4..7, 7..n],
+                                    11 | 12 => &[0..4, 4..8, 8..n],
+                                    13 => &[0..5, 5..9, 9..n],
+                                    14 | 15 => &[0..5, 5..10, 10..n],
+                                    16.. => &[0..4, 4..8, 8..12, 12..n],
+                                };
+
+                                let str = ranges
+                                    .iter()
+                                    .map(|range| &str[range.clone()])
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+
                                 Frame::default()
                                     .stroke(Stroke::new(0.5, Color32::GRAY))
                                     .show(ui, |ui| {
                                         ui.add(
-                                            egui::Label::new(String::from(match val {
-                                                0..=9 => val + b'0',
-                                                10.. => val - 10 + b'A',
-                                            }
-                                                as char))
+                                            egui::Label::new(
+                                                RichText::new(str)
+                                                    .font(egui::FontId::monospace(font_size)),
+                                            )
                                             .selectable(false),
                                         )
                                     })
                                     .response
                             })
-                        } else if let Some(color) = get_color_of_bf_op(val) {
-                            ui.put(
-                                pos,
-                                egui::Label::new(RichText::new(val as char).color(color))
-                                    .selectable(false),
-                            )
-                        } else {
-                            ui.put(
-                                pos,
-                                egui::Label::new(String::from(val as char)).selectable(false),
-                            )
-                        }
-                    } else if self.settings.render_unicode
-                        && let Ok(val) = val.try_into()
-                        && let Some(val) = char::from_u32(val)
-                        && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
-                    {
-                        ui.put(pos, egui::Label::new(String::from(val)).selectable(false))
-                    } else {
-                        ui.put(pos, |ui: &mut Ui| {
-                            // this is not great
-                            // i'm not really sure what the best way to do this would be
-                            let str = format!("{val:X}");
-                            let n = str.len();
-                            let font_size = match n {
-                                ..=1 => 16.0,
-                                2 => 8.0,
-                                3..=6 => 6.0,
-                                7..16 => 4.0,
-                                16.. => 3.2,
-                            };
-
-                            let ranges: &[Range<usize>] = match n {
-                                0..4 => &[0..n],
-                                4 => &[0..2, 2..n],
-                                5 | 6 => &[0..3, 3..n],
-                                7 | 8 | 9 => &[0..3, 3..6, 6..n],
-                                10 => &[0..4, 4..7, 7..n],
-                                11 | 12 => &[0..4, 4..8, 8..n],
-                                13 => &[0..5, 5..9, 9..n],
-                                14 | 15 => &[0..5, 5..10, 10..n],
-                                16.. => &[0..4, 4..8, 8..12, 12..n],
-                            };
-
-                            let str = ranges
-                                .iter()
-                                .map(|range| &str[range.clone()])
-                                .collect::<Vec<_>>()
-                                .join("\n");
-
-                            Frame::default()
-                                .stroke(Stroke::new(0.5, Color32::GRAY))
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(str)
-                                                .font(egui::FontId::monospace(font_size)),
-                                        )
-                                        .selectable(false),
-                                    )
-                                })
-                                .response
-                        })
-                    };
+                        };
+                    }
                 }
             })
             .response;
@@ -932,6 +977,7 @@ impl App {
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        puffin::profile_function!();
         egui::MenuBar::new().ui(ui, |ui| {
             let is_web = cfg!(target_arch = "wasm32");
             ui.menu_button("File", |ui| {
@@ -1086,6 +1132,7 @@ impl App {
     }
 
     fn info_panel(&mut self, ui: &mut egui::Ui) {
+        puffin::profile_function!();
         if let Mode::Playing {
             bf_state, running, ..
         } = &mut self.mode
@@ -1210,6 +1257,7 @@ impl App {
 }
 
 fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
+    puffin::profile_function!();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.label("Powered by ");
