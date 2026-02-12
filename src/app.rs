@@ -1,8 +1,7 @@
 use coarsetime::{Duration, Instant};
-use core::f32;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
-use egui::{FontId, Id, Modal, RichText, ScrollArea, StrokeKind, TextStyle};
+use egui::{FontId, Id, Mesh, Modal, RichText, ScrollArea, StrokeKind, TextStyle};
 use phf::phf_map;
 use std::future::Future;
 use std::ops::Range;
@@ -99,6 +98,94 @@ impl Default for Settings {
             render_unicode: true,
             invalid_operation_behaviour: InvalidOperationBehaviour::Halt,
         }
+    }
+}
+
+struct CharRenderer {
+    glyph_uv_position: [Rect; 256],
+    glyph_size: [Vec2; 256],
+    glyph_offset: [Vec2; 256],
+}
+
+impl CharRenderer {
+    // There is likely a better way to find these values
+    fn new(ctx: &egui::Context) -> Self {
+        puffin::profile_function!();
+        let mut glyph_uv_position = vec![Rect::ZERO];
+        let mut glyph_size = vec![Vec2::ZERO];
+        let mut glyph_offset = vec![Vec2::ZERO];
+
+        static DIVISOR: f32 = 2.0;
+
+        ctx.fonts(|fonts| {
+            let size = fonts.font_image_size();
+            for val in 0u8..=255 {
+                let galley = fonts.layout_no_wrap(
+                    String::from(val as char),
+                    egui::FontId::monospace(32.0),
+                    egui::Color32::WHITE,
+                );
+                if let Some(row) = galley.rows.first() {
+                    if let Some(g) = row.glyphs.first() {
+                        glyph_uv_position.push(Rect::from_two_pos(
+                            Pos2::new(
+                                g.uv_rect.min[0] as f32 / size[0] as f32,
+                                g.uv_rect.min[1] as f32 / size[1] as f32,
+                            ),
+                            Pos2::new(
+                                g.uv_rect.max[0] as f32 / size[0] as f32,
+                                g.uv_rect.max[1] as f32 / size[1] as f32,
+                            ),
+                        ));
+                        glyph_size.push(g.uv_rect.size / DIVISOR);
+                        glyph_offset.push(g.uv_rect.offset / DIVISOR);
+                    }
+                }
+            }
+        });
+
+        Self {
+            glyph_uv_position: glyph_uv_position.try_into().unwrap(),
+            glyph_size: glyph_size.try_into().unwrap(),
+            glyph_offset: glyph_offset.try_into().unwrap(),
+        }
+    }
+
+    fn draw(&self, mesh: &mut Mesh, egui_pos: Rect, val: u8, color: Color32) {
+        let uv_pos = self.glyph_uv_position[val as usize];
+        let glyph_size = self.glyph_size[val as usize];
+        let glyph_offset = self.glyph_offset[val as usize];
+
+        static CENTERING_OFFSET: Vec2 = Vec2::new(1.0, -3.0); // eyeballed
+
+        let egui_pos = Rect::from_min_size(
+            egui_pos.left_bottom() + glyph_offset + CENTERING_OFFSET,
+            glyph_size,
+        );
+
+        let idx = mesh.vertices.len() as u32;
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui_pos.left_top(),
+            uv: uv_pos.left_top(),
+            color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui_pos.right_top(),
+            uv: uv_pos.right_top(),
+            color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui_pos.right_bottom(),
+            uv: uv_pos.right_bottom(),
+            color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui_pos.left_bottom(),
+            uv: uv_pos.left_bottom(),
+            color,
+        });
+        mesh.indices
+            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 3, idx]);
     }
 }
 
@@ -352,9 +439,11 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         puffin::profile_function!();
-        puffin::GlobalProfiler::lock().new_frame();
 
-        puffin_egui::show_viewport_if_enabled(ctx);
+        if !cfg!(target_arch = "wasm32") {
+            puffin::GlobalProfiler::lock().new_frame();
+            puffin_egui::show_viewport_if_enabled(ctx);
+        }
 
         let dur = std::time::Duration::from_millis(5000);
         if let Mode::Playing {
@@ -827,29 +916,32 @@ impl App {
                     };
                 }
 
+                static PROFILE_EACH_CHAR: bool = false;
+
                 {
                     puffin::profile_scope!("chars");
+
+                    let mut mesh = egui::Mesh::with_texture(egui::TextureId::default());
+                    // TODO: cache this and only remake when atlas updates (which it prolly doesn't)
+                    let char_renderer = CharRenderer::new(ui.ctx());
+
                     let map = match &mut self.mode {
                         Mode::Playing { bf_state, .. } => &mut bf_state.map,
                         Mode::Editing { fungespace, .. } => fungespace,
                     };
                     for (pos, val) in map.entries() {
                         let pos = recter(pos, self.scene_offset);
-                    
 
-                        if !clip_rect.intersects(pos) {
+                        if !clip_rect.intersects(pos) || val == ' ' as i64 {
                             continue;
                         }
 
+                        //puffin::profile_scope!("char");
 
-                        puffin::profile_scope!("char");
-                        
-                        if let Ok(val) = TryInto::<u8>::try_into(val)
-                            && val <= b'~'
-                        {
+                        if let Ok(val) = TryInto::<u8>::try_into(val) {
                             if val < b' ' {
-                                puffin::profile_scope!("char boxed");
-                                ui.put(pos, |ui: &mut Ui| {
+                                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char boxed");
+                                ui.place(pos, |ui: &mut Ui| {
                                     Frame::default()
                                         .stroke(Stroke::new(0.5, Color32::GRAY))
                                         .show(ui, |ui| {
@@ -863,31 +955,24 @@ impl App {
                                             )
                                         })
                                         .response
-                                })
+                                });
                             } else if let Some(color) = get_color_of_bf_op(val) {
-                                puffin::profile_scope!("char colored");
-                                ui.put(
-                                    pos,
-                                    egui::Label::new(RichText::new(val as char).color(color))
-                                        .selectable(false),
-                                )
+                                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char colored");
+                                char_renderer.draw(&mut mesh, pos, val, color);
                             } else {
-                                puffin::profile_scope!("char simple");
-                                ui.put(
-                                    pos,
-                                    egui::Label::new(String::from(val as char)).selectable(false),
-                                )
+                                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char simple");
+                                char_renderer.draw(&mut mesh, pos, val, Color32::WHITE);
                             }
                         } else if self.settings.render_unicode
                             && let Ok(val) = val.try_into()
                             && let Some(val) = char::from_u32(val)
                             && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
                         {
-                            puffin::profile_scope!("char unicode");
-                            ui.put(pos, egui::Label::new(String::from(val)).selectable(false))
+                            puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unicode");
+                            ui.place(pos, egui::Label::new(String::from(val)).selectable(false));
                         } else {
-                            puffin::profile_scope!("char unknown");
-                            ui.put(pos, |ui: &mut Ui| {
+                            puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unknown");
+                            ui.place(pos, |ui: &mut Ui| {
                                 // this is not great
                                 // i'm not really sure what the best way to do this would be
                                 let str = format!("{val:X}");
@@ -930,9 +1015,10 @@ impl App {
                                         )
                                     })
                                     .response
-                            })
+                            });
                         };
                     }
+                    ui.painter().add(egui::Shape::Mesh(mesh.into()));
                 }
             })
             .response;
@@ -1121,6 +1207,13 @@ impl App {
                     &mut self.settings.render_unicode,
                     "Display non-ascii characters",
                 );
+
+                if !is_web {
+                    let mut profile = puffin::are_scopes_on();
+                    ui.checkbox(&mut profile, "Enable profiling");
+                    puffin::set_scopes_on(profile);
+                }
+
                 if ui.button("Advanced settings").clicked() {
                     self.settings_modal_open = true
                 };
