@@ -92,6 +92,7 @@ pub struct Graphics {
 
 #[derive(Clone)]
 pub struct State {
+    pub instruction_count: usize,
     pub map: FungeSpace,
     pub string_mode: bool,
     pub position: (i64, i64),
@@ -241,6 +242,7 @@ impl Graphics {
 impl Default for State {
     fn default() -> Self {
         Self {
+            instruction_count: 0,
             map: FungeSpace::new(),
             string_mode: false,
             position: (0, 0),
@@ -315,6 +317,7 @@ impl State {
     }
 
     pub fn step(&mut self, settings: &Settings) -> StepStatus {
+        self.instruction_count += 1;
         let status = self.step_inner(settings);
         if self.breakpoints.contains(&self.position) {
             return StepStatus::Breakpoint;

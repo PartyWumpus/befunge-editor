@@ -1,4 +1,5 @@
 use coarsetime::{Duration, Instant};
+use egui::containers::menu::SubMenuButton;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
 use egui::{FontId, Id, Mesh, Modal, RichText, ScrollArea, StrokeKind, TextStyle};
@@ -26,7 +27,36 @@ static PRESETS: phf::Map<&'static str, &'static str> = phf_map! {
        ^$8               <<_       @    
        ^^>2v           >:9-^
           ^>x222x>:6x1+^< 
-"#
+"#,
+    "Windmill" => r##"0".omed s"v
+          "                       >v
+          i                        8
+                                   4
+          s             >       > ^*
+          i    >99+0g1+#^_77+0g#^_188+0p099+0p>  v
+          h    ^        <          #            <
+          T    >88+0g1+#^_66+0g#^_088+0p01-99+0p^
+          "    ^        <         <#             #<
+>         v    >99+0g1-#^_77+0g8-#^_01-88+0p099+0p^
+|   >#:>#,<    ^        <         <#            <2
+               >88+0g1-#^_66+0g8-#^_088+0p199+0p^2
+>0>:"#"\0p:5 v ^                   $             g
+v_^#!\+1\!`+4< ^p0+77+g0+99g0+77<  >66+0g1+v     v
+>1-:"#"\v      >66+0g88+0g+66+0p^  v+1g0+77<     8
+|`0:p+19<      ^                   g             4
+>:"#"\0\p:v>   ^<                  -             *
+|\+1\!`+45<^p0+<               v" "_"@"v         -
+>1-:"#"\ v>p099^^     <        >66+v+66<         #
+|`0:p\+19<^0+88<^      p+1g0+77+1g0<       >" " #< v
+$>-66+0p077+0p1^ vp+2g0+67+2g0+56 < pp0+67:0+560<|#<
+01               :    #    v    p0 +76+1g< >"#" #< ^
+>^               >65+0g6- #v_01-65+0p67+0^
+                      ^ $ <>76+0gv#
+                          ^     <> 7-v
+                                ^_v#!<
+                                  #
+                           >+56+0p^
+                           ^1g0+56<"##
 };
 
 #[derive(Default, Clone)]
@@ -156,7 +186,7 @@ impl CharRenderer {
         let glyph_size = self.glyph_size[val as usize];
         let glyph_offset = self.glyph_offset[val as usize];
 
-        static CENTERING_OFFSET: Vec2 = Vec2::new(1.0, -3.0); // eyeballed
+        static CENTERING_OFFSET: Vec2 = Vec2::new(1.5, -3.5); // eyeballed
 
         let egui_pos = Rect::from_min_size(
             egui_pos.left_bottom() + glyph_offset + CENTERING_OFFSET,
@@ -189,13 +219,18 @@ impl CharRenderer {
     }
 }
 
+enum ModalState {
+    Settings,
+    SetPosition(i64, i64),
+}
+
 pub struct App {
     texture: TextureHandle,
     text_channel: (Sender<String>, Receiver<String>),
     settings: Settings,
     mode: Mode,
     scene_rect: Rect,
-    settings_modal_open: bool,
+    open_modal: Option<ModalState>,
     scene_offset: (i64, i64),
     cursor_pos: (i64, i64),
 }
@@ -205,10 +240,16 @@ fn poss(pos: (f32, f32)) -> Pos2 {
 }
 
 fn poss_reverse(pos: Pos2, offset: (i64, i64)) -> (i64, i64) {
-    (
-        (pos.x / 13.0) as i64 + offset.0,
-        (pos.y / 17.0) as i64 + offset.1,
-    )
+    let x = pos.x / 13.0;
+    let x = if x.is_sign_negative() { x - 1.0 } else { x };
+
+    let y = pos.y / 17.0;
+    let y = if y.is_sign_negative() { y - 1.0 } else { y };
+    (x as i64 + offset.0, y as i64 + offset.1)
+}
+
+fn intersects(a: ((i64, i64), (i64, i64)), b: (i64, i64)) -> bool {
+    a.0.0 <= b.0 && b.0 <= a.1.0 && a.0.1 <= b.1 && b.1 <= a.1.1
 }
 
 impl CursorState {
@@ -315,14 +356,16 @@ impl Mode {
                 let elapsed = time_since_step.elapsed();
                 let time_per_step = match speed {
                     0 => unreachable!(),
-                    1 => Duration::from_millis((1000.0 / 1.0) as u64),
-                    2 => Duration::from_millis((1000.0 / 2.0) as u64),
-                    3 => Duration::from_millis((1000.0 / 4.0) as u64),
-                    4 => Duration::from_millis((1000.0 / 8.0) as u64),
-                    5 => Duration::from_millis((1000.0 / 16.0) as u64),
-                    _ => Duration::from_millis((1000.0 / 32.0) as u64),
+                    1 => elapsed >= Duration::from_millis((1000.0 / 1.0) as u64),
+                    2 => elapsed >= Duration::from_millis((1000.0 / 2.0) as u64),
+                    3 => elapsed >= Duration::from_millis((1000.0 / 4.0) as u64),
+                    4 => elapsed >= Duration::from_millis((1000.0 / 8.0) as u64),
+                    5 => elapsed >= Duration::from_millis((1000.0 / 16.0) as u64),
+                    6..=19 => elapsed >= Duration::from_millis((1000.0 / 32.0) as u64),
+                    _ => true,
                 };
-                if elapsed >= time_per_step {
+                if time_per_step {
+                    bf_state.instruction_count = 0;
                     match speed {
                         ..6 => {
                             Self::step_befunge_inner(bf_state, running, error_state, settings);
@@ -351,10 +394,10 @@ impl Mode {
                                 };
                             }
                         }
-                        16..=19 => {
+                        16..=20 => {
                             let now = Instant::now();
                             loop {
-                                for _ in 0..=10000 {
+                                for _ in 0..10000 {
                                     if Self::step_befunge_inner(
                                         bf_state,
                                         running,
@@ -369,8 +412,7 @@ impl Mode {
                                         0 => 4,
                                         1 => 8,
                                         2 => 16,
-                                        3 => 32,
-                                        _ => unreachable!(),
+                                        _ => 32,
                                     })
                                 {
                                     break;
@@ -409,6 +451,7 @@ impl App {
             settings,
             scene_offset: (0, 0),
             cursor_pos: (0, 0),
+            open_modal: None,
             mode: Mode::Editing {
                 cursor_state: CursorState::default(),
                 fungespace: FungeSpace::new(),
@@ -418,8 +461,6 @@ impl App {
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
-
-            settings_modal_open: false,
         }
     }
 }
@@ -487,6 +528,9 @@ impl eframe::App for App {
 
                     ui.label(self.cursor_pos.0.to_string());
                     ui.label(self.cursor_pos.1.to_string());
+                    if let Mode::Playing { bf_state, .. } = &self.mode {
+                        ui.label(bf_state.instruction_count.to_string());
+                    };
                 });
             });
         });
@@ -545,7 +589,7 @@ impl eframe::App for App {
                     });
 
                     ui.horizontal(|ui| {
-                        ui.add(egui::Slider::new(speed, 1..=19).text("speed"));
+                        ui.add(egui::Slider::new(speed, 1..=20).text("speed"));
                     });
                 });
             }
@@ -556,7 +600,9 @@ impl eframe::App for App {
                     ui.set_min_height(100.0);
 
                     self.befunge_scene(ui);
-                    self.befunge_input(ui);
+                    if self.open_modal.is_none() {
+                        self.befunge_input(ui);
+                    }
                 });
         });
     }
@@ -699,6 +745,7 @@ impl App {
                             );
                             loop {
                                 painter.circle_filled(Pos2::new(x, y), 0.5, Color32::from_gray(90));
+                                //painter.rect_filled(Rect::from_min_max(Pos2::new(x, y), Pos2::new(x+0.5, y+0.5)), 0.0, Color32::from_gray(90));
                                 if x > f32::min(
                                     clip_rect.right(),
                                     (i64::MAX - i64::max(self.scene_offset.0, 0) - 1) as f32 * 13.0,
@@ -929,12 +976,18 @@ impl App {
                         Mode::Playing { bf_state, .. } => &mut bf_state.map,
                         Mode::Editing { fungespace, .. } => fungespace,
                     };
-                    for (pos, val) in map.entries() {
-                        let pos = recter(pos, self.scene_offset);
 
-                        if !clip_rect.intersects(pos) || val == ' ' as i64 {
+                    let integer_clip_rect = (
+                        poss_reverse(clip_rect.left_top(), self.scene_offset),
+                        poss_reverse(clip_rect.right_bottom(), self.scene_offset),
+                    );
+
+                    for (pos, val) in map.entries() {
+                        if !intersects(integer_clip_rect, pos) || val == ' ' as i64 {
                             continue;
                         }
+
+                        let pos = recter(pos, self.scene_offset);
 
                         //puffin::profile_scope!("char");
 
@@ -961,7 +1014,7 @@ impl App {
                                 char_renderer.draw(&mut mesh, pos, val, color);
                             } else {
                                 puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char simple");
-                                char_renderer.draw(&mut mesh, pos, val, Color32::WHITE);
+                                char_renderer.draw(&mut mesh, pos, val, Color32::GRAY);
                             }
                         } else if self.settings.render_unicode
                             && let Ok(val) = val.try_into()
@@ -1056,7 +1109,7 @@ impl App {
 
         if let Mode::Playing { .. } = self.mode
             && response.secondary_clicked()
-            && let Some(pos) = response.interact_pointer_pos()
+            && let Some(_pos) = response.interact_pointer_pos()
         {
             // TODO, a "run through to click" feature?
         };
@@ -1128,41 +1181,14 @@ impl App {
                 });
             });
 
-            if self.settings_modal_open {
+            if self.open_modal.is_some() {
                 let modal = Modal::new(Id::new("Settings modal")).show(ui.ctx(), |ui| {
                     ui.set_width(300.0);
-                    ui.heading("Advanced settings");
 
-                    ui.separator();
-                    ui.label(
-                        RichText::new("Track position history").font(FontId::proportional(14.0)),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.color_edit_button_srgb(&mut self.settings.pos_history.1);
-                        ui.label("Color");
-                    });
-                    ui.horizontal(|ui| ui.checkbox(&mut self.settings.pos_history.0, "Enabled"));
-
-                    ui.separator();
-                    ui.label(RichText::new("Track put history").font(FontId::proportional(14.0)));
-                    ui.horizontal(|ui| {
-                        ui.color_edit_button_srgb(&mut self.settings.put_history.1);
-                        ui.label("Color");
-                    });
-                    ui.checkbox(&mut self.settings.put_history.0, "Enabled");
-
-                    ui.separator();
-                    ui.label(RichText::new("Track get history").font(FontId::proportional(14.0)));
-                    ui.horizontal(|ui| {
-                        ui.color_edit_button_srgb(&mut self.settings.get_history.1);
-                        ui.label("Color");
-                    });
-                    ui.horizontal(|ui| ui.checkbox(&mut self.settings.get_history.0, "Enabled"));
-
-                    ui.separator();
-                    if ui.button("Reset all settings").clicked() {
-                        self.settings = Settings::default();
-                    };
+                    match self.open_modal.as_mut().unwrap() {
+                        ModalState::Settings => self.settings_modal(ui),
+                        ModalState::SetPosition(x, y) => Self::set_position_modal(ui, x, y),
+                    }
 
                     ui.add_space(32.0);
 
@@ -1178,7 +1204,14 @@ impl App {
                 });
 
                 if modal.should_close() {
-                    self.settings_modal_open = false;
+                    let prev_modal = self.open_modal.take();
+                    match prev_modal.unwrap() {
+                        ModalState::Settings => (),
+                        ModalState::SetPosition(x, y) => {
+                            self.scene_offset = (x, y);
+                            self.scene_rect.set_center(poss((0.5, 0.5)));
+                        }
+                    }
                 }
             }
 
@@ -1210,12 +1243,21 @@ impl App {
 
                 if !is_web {
                     let mut profile = puffin::are_scopes_on();
-                    ui.checkbox(&mut profile, "Enable profiling");
+                    ui.checkbox(&mut profile, "Enable UI profiling");
                     puffin::set_scopes_on(profile);
                 }
 
-                if ui.button("Advanced settings").clicked() {
-                    self.settings_modal_open = true
+                let settings_button =
+                    egui::Button::new("Advanced settings").right_text(SubMenuButton::RIGHT_ARROW);
+
+                if ui.add(settings_button).clicked() {
+                    self.open_modal = Some(ModalState::Settings);
+                };
+            });
+
+            ui.menu_button("Tools", |ui| {
+                if ui.button("Set viewport position").clicked() {
+                    self.open_modal = Some(ModalState::SetPosition(0, 0));
                 };
             });
             ui.add_space(8.0);
@@ -1346,6 +1388,44 @@ impl App {
                 });
             });
         }
+    }
+
+    fn settings_modal(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Advanced settings");
+        ui.separator();
+        ui.label(RichText::new("Track position history").font(FontId::proportional(14.0)));
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(&mut self.settings.pos_history.1);
+            ui.label("Color");
+        });
+        ui.horizontal(|ui| ui.checkbox(&mut self.settings.pos_history.0, "Enabled"));
+
+        ui.separator();
+        ui.label(RichText::new("Track put history").font(FontId::proportional(14.0)));
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(&mut self.settings.put_history.1);
+            ui.label("Color");
+        });
+        ui.checkbox(&mut self.settings.put_history.0, "Enabled");
+
+        ui.separator();
+        ui.label(RichText::new("Track get history").font(FontId::proportional(14.0)));
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(&mut self.settings.get_history.1);
+            ui.label("Color");
+        });
+        ui.horizontal(|ui| ui.checkbox(&mut self.settings.get_history.0, "Enabled"));
+
+        ui.separator();
+        if ui.button("Reset all settings").clicked() {
+            self.settings = Settings::default();
+        };
+    }
+
+    fn set_position_modal(ui: &mut egui::Ui, x: &mut i64, y: &mut i64) {
+        ui.heading("Set position");
+        ui.add(egui::DragValue::new(x).speed(0.1));
+        ui.add(egui::DragValue::new(y).speed(0.1));
     }
 }
 
