@@ -1,8 +1,9 @@
 use coarsetime::{Duration, Instant};
 use egui::containers::menu::SubMenuButton;
+use egui::emath::TSTransform;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
-use egui::{FontId, Id, Mesh, Modal, RichText, ScrollArea, StrokeKind, TextStyle};
+use egui::{FontId, Id, LayerId, Mesh, Modal, RichText, ScrollArea, Shape, StrokeKind, TextStyle};
 use include_dir::{Dir, include_dir};
 use std::future::Future;
 use std::ops::Range;
@@ -88,12 +89,16 @@ impl Default for Settings {
 }
 
 struct CharRenderer {
-    glyph_uv_position: [Rect; 256],
-    glyph_size: [Vec2; 256],
-    glyph_offset: [Vec2; 256],
+    glyph_uv_position: [Rect; Self::LENGTH],
+    glyph_size: [Vec2; Self::LENGTH],
+    glyph_offset: [Vec2; Self::LENGTH],
 }
 
 impl CharRenderer {
+    const MAX: u8 = 255;
+    const MIN: u8 = b' ' + 1;
+    const LENGTH: usize = (Self::MAX - Self::MIN + 2) as usize;
+
     // There is likely a better way to find these values
     fn new(ctx: &egui::Context) -> Self {
         puffin::profile_function!();
@@ -105,30 +110,30 @@ impl CharRenderer {
 
         ctx.fonts(|fonts| {
             let size = fonts.font_image_size();
-            for val in 0u8..=255 {
+            for val in Self::MIN..=Self::MAX {
                 let galley = fonts.layout_no_wrap(
                     String::from(val as char),
                     egui::FontId::monospace(32.0),
                     egui::Color32::WHITE,
                 );
-                if let Some(row) = galley.rows.first() {
-                    if let Some(g) = row.glyphs.first() {
-                        glyph_uv_position.push(Rect::from_two_pos(
-                            Pos2::new(
-                                g.uv_rect.min[0] as f32 / size[0] as f32,
-                                g.uv_rect.min[1] as f32 / size[1] as f32,
-                            ),
-                            Pos2::new(
-                                g.uv_rect.max[0] as f32 / size[0] as f32,
-                                g.uv_rect.max[1] as f32 / size[1] as f32,
-                            ),
-                        ));
-                        glyph_size.push(g.uv_rect.size / DIVISOR);
-                        glyph_offset.push(g.uv_rect.offset / DIVISOR);
-                    }
-                }
+                let row = galley.rows.first().unwrap();
+                let g = row.glyphs.first().unwrap();
+                glyph_uv_position.push(Rect::from_two_pos(
+                    Pos2::new(
+                        g.uv_rect.min[0] as f32 / size[0] as f32,
+                        g.uv_rect.min[1] as f32 / size[1] as f32,
+                    ),
+                    Pos2::new(
+                        g.uv_rect.max[0] as f32 / size[0] as f32,
+                        g.uv_rect.max[1] as f32 / size[1] as f32,
+                    ),
+                ));
+                glyph_size.push(g.uv_rect.size / DIVISOR);
+                glyph_offset.push(g.uv_rect.offset / DIVISOR);
             }
         });
+
+        assert_eq!(glyph_uv_position.len(), Self::LENGTH);
 
         Self {
             glyph_uv_position: glyph_uv_position.try_into().unwrap(),
@@ -138,6 +143,8 @@ impl CharRenderer {
     }
 
     fn draw(&self, mesh: &mut Mesh, egui_pos: Rect, val: u8, color: Color32) {
+        assert!(val >= Self::MIN);
+        let val = val - Self::MIN + 1;
         let uv_pos = self.glyph_uv_position[val as usize];
         let glyph_size = self.glyph_size[val as usize];
         let glyph_offset = self.glyph_offset[val as usize];
@@ -189,6 +196,7 @@ pub struct App {
     open_modal: Option<ModalState>,
     scene_offset: (i64, i64),
     cursor_pos: (i64, i64),
+    popup_pos: Option<(i64, i64)>,
 }
 
 fn poss(pos: (f32, f32)) -> Pos2 {
@@ -407,6 +415,7 @@ impl App {
             settings,
             scene_offset: (0, 0),
             cursor_pos: (0, 0),
+            popup_pos: None,
             open_modal: None,
             mode: Mode::Editing {
                 cursor_state: CursorState::default(),
@@ -1027,7 +1036,84 @@ impl App {
                             });
                         };
                     }
+
                     ui.painter().add(egui::Shape::Mesh(mesh.into()));
+                }
+
+                if let Some(popup_pos) = self.popup_pos {
+                    puffin::profile_scope!("popup");
+                    let transform = ui
+                        .ctx()
+                        .layer_transform_to_global(ui.layer_id())
+                        .unwrap_or(TSTransform::IDENTITY);
+
+                    let rect = recter(popup_pos, self.scene_offset);
+
+                    ui.painter().add(Shape::dashed_line(
+                        &[
+                            rect.left_top(),
+                            rect.right_top(),
+                            rect.right_bottom(),
+                            rect.left_bottom(),
+                            rect.left_top(),
+                        ],
+                        Stroke::new(0.5, Color32::ORANGE),
+                        1.0,
+                        1.0,
+                    ));
+
+                    // TODO: figure out sizing
+                    let popup = egui::Popup::new(
+                        Id::new("info context menu"),
+                        ui.ctx().clone(),
+                        transform.mul_pos(poss((
+                            (popup_pos.0 - self.scene_offset.0) as f32 + 0.75,
+                            (popup_pos.1 - self.scene_offset.1) as f32 + 0.75,
+                        ))),
+                        LayerId::background(),
+                    )
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.label(format!("Pos: {}, {}", popup_pos.0, popup_pos.1));
+                        match &mut self.mode {
+                            Mode::Playing { bf_state, .. } => {
+                                ui.label(format!(
+                                    "Val: {:#06x}",
+                                    bf_state.map.get_wrapped(popup_pos)
+                                ));
+
+                                let mut breakpoint = bf_state.breakpoints.contains(&popup_pos);
+                                ui.input(|e| {
+                                    if e.key_pressed(egui::Key::B) {
+                                        if breakpoint {
+                                            bf_state.breakpoints.remove(&popup_pos);
+                                        } else {
+                                            bf_state.breakpoints.insert(popup_pos);
+                                        }
+                                    }
+                                });
+                                if ui.checkbox(&mut breakpoint, "Breakpoint").clicked() {
+                                    if breakpoint {
+                                        bf_state.breakpoints.insert(popup_pos);
+                                    } else {
+                                        bf_state.breakpoints.remove(&popup_pos);
+                                    }
+                                };
+                            }
+                            Mode::Editing { fungespace, .. } => {
+                                ui.label(format!(
+                                    "Val: {:#06x}",
+                                    fungespace.get_wrapped(popup_pos)
+                                ));
+                            }
+                        };
+                    });
+
+                    if let Some(popup) = popup
+                        && popup.response.should_close()
+                    {
+                        self.popup_pos = None;
+                    }
                 }
             })
             .response;
@@ -1046,15 +1132,7 @@ impl App {
         {
             let pos = poss_reverse(pos, self.scene_offset);
             match &mut self.mode {
-                Mode::Playing { bf_state, .. } => {
-                    if pos.0 >= 0 && pos.1 >= 0 {
-                        if bf_state.breakpoints.contains(&pos) {
-                            bf_state.breakpoints.remove(&pos)
-                        } else {
-                            bf_state.breakpoints.insert(pos)
-                        };
-                    }
-                }
+                Mode::Playing { .. } => (),
                 Mode::Editing { cursor_state, .. } => {
                     if pos.1 >= 0 && pos.0 >= 0 {
                         cursor_state.location = pos;
@@ -1063,11 +1141,13 @@ impl App {
             }
         };
 
-        if let Mode::Playing { .. } = self.mode
-            && response.secondary_clicked()
-            && let Some(_pos) = response.interact_pointer_pos()
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
         {
-            // TODO, a "run through to click" feature?
+            let pos = poss_reverse(pos, self.scene_offset);
+            if pos.0 >= 0 && pos.1 >= 0 {
+                self.popup_pos = Some(pos);
+            }
         };
     }
 
@@ -1138,12 +1218,12 @@ impl App {
                 }
             });
 
-            if self.open_modal.is_some() {
+            if let Some(open_modal) = &mut self.open_modal {
                 let modal = Modal::new(Id::new("Settings modal")).show(ui.ctx(), |ui| {
                     ui.set_width(300.0);
 
-                    match self.open_modal.as_mut().unwrap() {
-                        ModalState::Settings => self.settings_modal(ui),
+                    match open_modal {
+                        ModalState::Settings => Self::settings_modal(ui, &mut self.settings),
                         ModalState::SetPosition(x, y) => Self::set_position_modal(ui, x, y),
                     }
 
@@ -1371,35 +1451,35 @@ impl App {
         }
     }
 
-    fn settings_modal(&mut self, ui: &mut egui::Ui) {
+    fn settings_modal(ui: &mut egui::Ui, settings: &mut Settings) {
         ui.heading("Advanced settings");
         ui.separator();
         ui.label(RichText::new("Track position history").font(FontId::proportional(14.0)));
         ui.horizontal(|ui| {
-            ui.color_edit_button_srgb(&mut self.settings.pos_history.1);
+            ui.color_edit_button_srgb(&mut settings.pos_history.1);
             ui.label("Color");
         });
-        ui.horizontal(|ui| ui.checkbox(&mut self.settings.pos_history.0, "Enabled"));
+        ui.horizontal(|ui| ui.checkbox(&mut settings.pos_history.0, "Enabled"));
 
         ui.separator();
         ui.label(RichText::new("Track put history").font(FontId::proportional(14.0)));
         ui.horizontal(|ui| {
-            ui.color_edit_button_srgb(&mut self.settings.put_history.1);
+            ui.color_edit_button_srgb(&mut settings.put_history.1);
             ui.label("Color");
         });
-        ui.checkbox(&mut self.settings.put_history.0, "Enabled");
+        ui.checkbox(&mut settings.put_history.0, "Enabled");
 
         ui.separator();
         ui.label(RichText::new("Track get history").font(FontId::proportional(14.0)));
         ui.horizontal(|ui| {
-            ui.color_edit_button_srgb(&mut self.settings.get_history.1);
+            ui.color_edit_button_srgb(&mut settings.get_history.1);
             ui.label("Color");
         });
-        ui.horizontal(|ui| ui.checkbox(&mut self.settings.get_history.0, "Enabled"));
+        ui.horizontal(|ui| ui.checkbox(&mut settings.get_history.0, "Enabled"));
 
         ui.separator();
         if ui.button("Reset all settings").clicked() {
-            self.settings = Settings::default();
+            *settings = Settings::default();
         };
     }
 
