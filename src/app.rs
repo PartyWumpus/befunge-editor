@@ -1130,10 +1130,11 @@ impl App {
                     }
                 });
 
-                ui.separator();
-
-                if !is_web && ui.add(egui::Button::new("Quit").right_text("❌")).clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if !is_web {
+                    ui.separator();
+                    if ui.add(egui::Button::new("Quit").right_text("❌")).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
             });
 
