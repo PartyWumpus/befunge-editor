@@ -3,7 +3,7 @@ use egui::containers::menu::SubMenuButton;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
 use egui::{FontId, Id, Mesh, Modal, RichText, ScrollArea, StrokeKind, TextStyle};
-use phf::phf_map;
+use include_dir::{Dir, include_dir};
 use std::future::Future;
 use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -13,51 +13,7 @@ use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, 
 use crate::befunge::{Event, FungeSpace, StepStatus, get_color_of_bf_op};
 use crate::{BefungeState, befunge};
 
-static PRESETS: phf::Map<&'static str, &'static str> = phf_map! {
-    "Addition" => "5 5 + .",
-    "Smile" =>r#"v
-
->        92+8         "~"v
-         vsp0         0*2<
-         >g:f         2:xv
-         vx51         x59<
-          
-      >          v          v
-      ^<                   vv
-       ^$8               <<_       @    
-       ^^>2v           >:9-^
-          ^>x222x>:6x1+^< 
-"#,
-    "Windmill" => r##"0".omed s"v
-          "                       >v
-          i                        8
-                                   4
-          s             >       > ^*
-          i    >99+0g1+#^_77+0g#^_188+0p099+0p>  v
-          h    ^        <          #            <
-          T    >88+0g1+#^_66+0g#^_088+0p01-99+0p^
-          "    ^        <         <#             #<
->         v    >99+0g1-#^_77+0g8-#^_01-88+0p099+0p^
-|   >#:>#,<    ^        <         <#            <2
-               >88+0g1-#^_66+0g8-#^_088+0p199+0p^2
->0>:"#"\0p:5 v ^                   $             g
-v_^#!\+1\!`+4< ^p0+77+g0+99g0+77<  >66+0g1+v     v
->1-:"#"\v      >66+0g88+0g+66+0p^  v+1g0+77<     8
-|`0:p+19<      ^                   g             4
->:"#"\0\p:v>   ^<                  -             *
-|\+1\!`+45<^p0+<               v" "_"@"v         -
->1-:"#"\ v>p099^^     <        >66+v+66<         #
-|`0:p\+19<^0+88<^      p+1g0+77+1g0<       >" " #< v
-$>-66+0p077+0p1^ vp+2g0+67+2g0+56 < pp0+67:0+560<|#<
-01               :    #    v    p0 +76+1g< >"#" #< ^
->^               >65+0g6- #v_01-65+0p67+0^
-                      ^ $ <>76+0gv#
-                          ^     <> 7-v
-                                ^_v#!<
-                                  #
-                           >+56+0p^
-                           ^1g0+56<"##
-};
+static PRESETS: Dir = include_dir!("./bf_programs");
 
 #[derive(Default, Clone)]
 enum Direction {
@@ -1120,13 +1076,13 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             let is_web = cfg!(target_arch = "wasm32");
             ui.menu_button("File", |ui| {
-                if ui.button("New File").clicked() {
+                if ui.button("📄 New").clicked() {
                     self.mode = Mode::Editing {
                         cursor_state: CursorState::default(),
                         fungespace: FungeSpace::new(),
                     }
                 }
-                if ui.button("📂 Open text file").clicked() {
+                if ui.button("📂 Open").clicked() {
                     let sender = self.text_channel.0.clone();
                     let task = rfd::AsyncFileDialog::new().pick_file();
                     // Context is wrapped in an Arc so it's cheap to clone as per:
@@ -1143,7 +1099,7 @@ impl App {
                     });
                 }
 
-                if ui.button("💾 Save text to file").clicked() {
+                if ui.button("💾 Save").clicked() {
                     let task = rfd::AsyncFileDialog::new().save_file();
                     let contents = match &mut self.mode {
                         Mode::Playing { bf_state, .. } => bf_state.map.serialize(),
@@ -1158,27 +1114,27 @@ impl App {
                     });
                 }
 
-                ui.separator();
-
-                if !is_web && ui.button("Quit").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-
-                ui.menu_button("Presets", |ui| {
-                    for key in PRESETS.keys() {
-                        if ui.button(*key).clicked() {
-                            match PRESETS.get(key) {
-                                None => unreachable!(),
-                                Some(text) => {
-                                    self.mode = Mode::Editing {
-                                        cursor_state: CursorState::default(),
-                                        fungespace: FungeSpace::new_from_string(text),
-                                    }
-                                }
+                ui.menu_button("👕 Load Preset", |ui| {
+                    for file in PRESETS.files() {
+                        if ui
+                            .button(file.path().file_stem().unwrap().to_string_lossy())
+                            .clicked()
+                        {
+                            self.mode = Mode::Editing {
+                                cursor_state: CursorState::default(),
+                                fungespace: FungeSpace::new_from_string(
+                                    file.contents_utf8().unwrap(),
+                                ),
                             }
                         }
                     }
                 });
+
+                ui.separator();
+
+                if !is_web && ui.add(egui::Button::new("Quit").right_text("❌")).clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             });
 
             if self.open_modal.is_some() {
@@ -1273,37 +1229,6 @@ impl App {
         } = &mut self.mode
         {
             if let Some(graphics) = &mut bf_state.graphics {
-                ui.label("Graphics:");
-                self.texture.set(
-                    egui::ColorImage {
-                        size: [graphics.size.0, graphics.size.1],
-                        source_size: Vec2::new(graphics.size.0 as f32, graphics.size.1 as f32),
-                        pixels: graphics.texture.clone(),
-                    },
-                    egui::TextureOptions::NEAREST,
-                );
-
-                let size = self.texture.size_vec2() * 2.0;
-                let sized_texture = egui::load::SizedTexture::new(&self.texture, size);
-                let canvas = ui.add(egui::Image::new(sized_texture).fit_to_exact_size(size));
-                let canvas = canvas.interact(Sense::click());
-                if canvas.clicked()
-                    && let Some(pos) = canvas.interact_pointer_pos()
-                {
-                    let container = canvas.interact_rect;
-                    let pos = pos.clamp(container.min, container.max);
-                    let pos = pos2(
-                        (pos.x - container.left()) / container.width(),
-                        (pos.y - container.top()) / container.height(),
-                    );
-                    let pixel_pos = (
-                        ((graphics.size.0 - 1) as f32 * pos.x).round() as i64,
-                        ((graphics.size.1 - 1) as f32 * pos.y).round() as i64,
-                    );
-                    graphics
-                        .event_queue
-                        .push_back(Event::MouseClick(pixel_pos.0, pixel_pos.1));
-                }
                 ui.horizontal(|ui| {
                     ui.label("Color:");
                     let size = Vec2::splat(16.0);
@@ -1322,7 +1247,62 @@ impl App {
                     let stroke = Stroke::new(1.0, color);
                     painter.circle(c, r, graphics.current_color, stroke);
                 });
-            }
+
+                egui::Window::new("Graphics")
+                    .min_size((1.0, 1.0))
+                    .show(ui.ctx(), |ui| {
+                        self.texture.set(
+                            egui::ColorImage {
+                                size: [graphics.size.0, graphics.size.1],
+                                source_size: Vec2::new(
+                                    graphics.size.0 as f32,
+                                    graphics.size.1 as f32,
+                                ),
+                                pixels: graphics.texture.clone(),
+                            },
+                            egui::TextureOptions::NEAREST,
+                        );
+
+                        let ppp = ui.ctx().pixels_per_point();
+                        let tex_size = self.texture.size_vec2();
+                        let available = ui.available_size();
+
+                        let scale = ((available * ppp) / tex_size).floor().min_elem().max(1.0);
+                        let display_size = tex_size * scale / ppp;
+
+                        let (rect, canvas) =
+                            ui.allocate_exact_size(display_size, egui::Sense::click());
+
+                        let snapped_min = (rect.min * ppp).round() / ppp;
+                        let snapped_rect = egui::Rect::from_min_size(snapped_min, display_size);
+
+                        let sized_texture =
+                            egui::load::SizedTexture::new(&self.texture, display_size);
+                        ui.painter().image(
+                            sized_texture.id,
+                            snapped_rect,
+                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                        if canvas.clicked()
+                            && let Some(pos) = canvas.interact_pointer_pos()
+                        {
+                            let container = canvas.interact_rect;
+                            let pos = pos.clamp(container.min, container.max);
+                            let pos = pos2(
+                                (pos.x - container.left()) / container.width(),
+                                (pos.y - container.top()) / container.height(),
+                            );
+                            let pixel_pos = (
+                                ((graphics.size.0 - 1) as f32 * pos.x).round() as i64,
+                                ((graphics.size.1 - 1) as f32 * pos.y).round() as i64,
+                            );
+                            graphics
+                                .event_queue
+                                .push_back(Event::MouseClick(pixel_pos.0, pixel_pos.1));
+                        }
+                    });
+            };
 
             ui.label("Stack:");
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {

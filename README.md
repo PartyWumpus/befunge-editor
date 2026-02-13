@@ -26,3 +26,8 @@ To run: `cargo run --release`
 - An easier way to move the screen large distances. Possibly a "minimap" style thing?
 - Undo in editor mode
 - Step backwards in play mode
+
+
+## Thanks
+
+Thanks [Mikescher](https://github.com/Mikescher) for the great BefunExec, and for the `Windmill` example program I stole for a preset program :)
