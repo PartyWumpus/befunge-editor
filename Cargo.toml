@@ -1,7 +1,7 @@
 [package]
 name = "befunge_editor"
 version = "0.1.0"
-authors = ["PartyWumpus <>"]
+authors = ["PartyWumpus <evie@partywump.us>"]
 edition = "2024"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
 
@@ -24,16 +24,20 @@ log = "0.4.27"
 serde = { version = "1.0.219", features = ["derive"] }
 clipline = "0.3.0"
 coarsetime = "0.1.36"
-#rand = "0.9.1"
-#rand_derive2 = "0.1.21"
 rfd = "0.15.3"
 futures = "0.3.31"
 thiserror = "2.0.15"
-puffin_egui = { git = "https://github.com/EmbarkStudios/puffin.git" } 
-puffin = { git = "https://github.com/EmbarkStudios/puffin.git" } 
 include_dir = "0.7.4"
 
+# in theory these can be removed from the web build
+puffin_egui = { git = "https://github.com/EmbarkStudios/puffin.git" } 
+puffin = { git = "https://github.com/EmbarkStudios/puffin.git" } 
+
+
 # native:
+#[target.'cfg(not(target_arch = "wasm32"))']
+#rustflags = "-C target-cpu=native"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
 env_logger = "0.11.8"
@@ -43,21 +47,18 @@ env_logger = "0.11.8"
 wasm-bindgen-futures = "0.4.50"
 web-sys = "0.3.70"              # to access the DOM (to hide the loading text)
 
+
+
+
 [profile.release]
-opt-level = 2 # fast and small wasm
+lto="fat"
+strip=true
+
+[profile.dev]
+opt-level = 2
+overflow-checks = false
 
 # Optimize all dependencies even in debug builds:
 [profile.dev.package."*"]
-opt-level = 2
+opt-level = 3
 strip = "debuginfo"
-
-
-[patch.crates-io]
-
-# If you want to use the bleeding edge version of egui and eframe:
-# egui = { git = "https://github.com/emilk/egui", branch = "master" }
-# eframe = { git = "https://github.com/emilk/egui", branch = "master" }
-
-# If you fork https://github.com/emilk/egui you can test with:
-# egui = { path = "../egui/crates/egui" }
-# eframe = { path = "../egui/crates/eframe" }
