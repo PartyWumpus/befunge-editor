@@ -3,13 +3,15 @@ use egui::containers::menu::SubMenuButton;
 use egui::emath::TSTransform;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
-use egui::{FontId, Id, LayerId, Mesh, Modal, RichText, ScrollArea, Shape, StrokeKind, TextStyle};
+use egui::{
+    FontId, Id, Label, LayerId, Mesh, Modal, RichText, ScrollArea, Shape, StrokeKind, TextStyle,
+};
 use include_dir::{Dir, include_dir};
 use std::future::Future;
 use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use egui::{Color32, Frame, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
+use egui::{Color32, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
 use crate::befunge::{Event, FungeSpace, StepStatus, get_color_of_bf_op};
 use crate::{BefungeState, befunge};
@@ -92,33 +94,54 @@ struct CharRenderer {
     glyph_uv_position: [Rect; Self::LENGTH],
     glyph_size: [Vec2; Self::LENGTH],
     glyph_offset: [Vec2; Self::LENGTH],
+    /// jank 'is atlas dirty' check
+    /// would be nice if i could use the built in delta
+    /// but it's one time use and eframe uses it :(
+    prev_fill_ratio: f32,
 }
 
 impl CharRenderer {
     const MAX: u8 = 255;
-    const MIN: u8 = b' ' + 1;
-    const LENGTH: usize = (Self::MAX - Self::MIN + 2) as usize;
+    const MIN: u8 = b' ';
+    const LENGTH: usize = (Self::MAX - Self::MIN + 1) as usize;
+
+    fn empty() -> Self {
+        Self {
+            glyph_uv_position: [Rect::ZERO; Self::LENGTH],
+            glyph_size: [Vec2::ZERO; Self::LENGTH],
+            glyph_offset: [Vec2::ZERO; Self::LENGTH],
+            prev_fill_ratio: 0.0,
+        }
+    }
 
     // There is likely a better way to find these values
-    fn new(ctx: &egui::Context) -> Self {
+    fn update(&mut self, ctx: &egui::Context) {
         puffin::profile_function!();
-        let mut glyph_uv_position = vec![Rect::ZERO];
-        let mut glyph_size = vec![Vec2::ZERO];
-        let mut glyph_offset = vec![Vec2::ZERO];
 
         static DIVISOR: f32 = 2.0;
 
         ctx.fonts(|fonts| {
             let size = fonts.font_image_size();
+
+            let fill_ratio = fonts.font_atlas_fill_ratio();
+            if fill_ratio == self.prev_fill_ratio {
+                return;
+            }
+            self.prev_fill_ratio = fill_ratio;
+
             for val in Self::MIN..=Self::MAX {
-                let galley = fonts.layout_no_wrap(
-                    String::from(val as char),
-                    egui::FontId::monospace(32.0),
-                    egui::Color32::WHITE,
-                );
+                let str = if val == Self::MIN {
+                    // special case, draws a box
+                    String::from("⬜")
+                } else {
+                    String::from(val as char)
+                };
+
+                let galley =
+                    fonts.layout_no_wrap(str, egui::FontId::monospace(32.0), egui::Color32::WHITE);
                 let row = galley.rows.first().unwrap();
                 let g = row.glyphs.first().unwrap();
-                glyph_uv_position.push(Rect::from_two_pos(
+                self.glyph_uv_position[(val - Self::MIN) as usize] = Rect::from_two_pos(
                     Pos2::new(
                         g.uv_rect.min[0] as f32 / size[0] as f32,
                         g.uv_rect.min[1] as f32 / size[1] as f32,
@@ -127,34 +150,31 @@ impl CharRenderer {
                         g.uv_rect.max[0] as f32 / size[0] as f32,
                         g.uv_rect.max[1] as f32 / size[1] as f32,
                     ),
-                ));
-                glyph_size.push(g.uv_rect.size / DIVISOR);
-                glyph_offset.push(g.uv_rect.offset / DIVISOR);
+                );
+                self.glyph_size[(val - Self::MIN) as usize] = g.uv_rect.size / DIVISOR;
+                self.glyph_offset[(val - Self::MIN) as usize] = g.uv_rect.offset / DIVISOR;
             }
         });
-
-        assert_eq!(glyph_uv_position.len(), Self::LENGTH);
-
-        Self {
-            glyph_uv_position: glyph_uv_position.try_into().unwrap(),
-            glyph_size: glyph_size.try_into().unwrap(),
-            glyph_offset: glyph_offset.try_into().unwrap(),
-        }
     }
 
     fn draw(&self, mesh: &mut Mesh, egui_pos: Rect, val: u8, color: Color32) {
         assert!(val >= Self::MIN);
-        let val = val - Self::MIN + 1;
+        let val = val - Self::MIN;
         let uv_pos = self.glyph_uv_position[val as usize];
         let glyph_size = self.glyph_size[val as usize];
         let glyph_offset = self.glyph_offset[val as usize];
 
-        static CENTERING_OFFSET: Vec2 = Vec2::new(1.5, -3.5); // eyeballed
+        static CENTERING_OFFSET: Vec2 = Vec2::new(1.5, -3.0); // eyeballed
 
-        let egui_pos = Rect::from_min_size(
-            egui_pos.left_bottom() + glyph_offset + CENTERING_OFFSET,
-            glyph_size,
-        );
+        let egui_pos = if val == 0 {
+            // special case, draws a box
+            egui_pos
+        } else {
+            Rect::from_min_size(
+                egui_pos.left_bottom() + glyph_offset + CENTERING_OFFSET,
+                glyph_size,
+            )
+        };
 
         let idx = mesh.vertices.len() as u32;
         mesh.vertices.push(egui::epaint::Vertex {
@@ -197,6 +217,7 @@ pub struct App {
     scene_offset: (i64, i64),
     cursor_pos: (i64, i64),
     popup_pos: Option<(i64, i64)>,
+    char_renderer: CharRenderer,
 }
 
 fn poss(pos: (f32, f32)) -> Pos2 {
@@ -426,6 +447,7 @@ impl App {
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
+            char_renderer: CharRenderer::empty(),
         }
     }
 }
@@ -450,6 +472,8 @@ impl eframe::App for App {
             puffin::GlobalProfiler::lock().new_frame();
             puffin_egui::show_viewport_if_enabled(ctx);
         }
+
+        self.char_renderer.update(ctx);
 
         let dur = std::time::Duration::from_millis(5000);
         if let Mode::Playing {
@@ -508,6 +532,7 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             puffin::profile_scope!("central panel");
+
             ui.horizontal(|ui| {
                 ui.heading("befunge editor");
                 if let Mode::Playing {
@@ -934,9 +959,6 @@ impl App {
                     puffin::profile_scope!("chars");
 
                     let mut mesh = egui::Mesh::with_texture(egui::TextureId::default());
-                    // TODO: cache this and only remake when atlas updates (which it prolly doesn't)
-                    let char_renderer = CharRenderer::new(ui.ctx());
-
                     let map = match &mut self.mode {
                         Mode::Playing { bf_state, .. } => &mut bf_state.map,
                         Mode::Editing { fungespace, .. } => fungespace,
@@ -959,27 +981,22 @@ impl App {
                         if let Ok(val) = TryInto::<u8>::try_into(val) {
                             if val < b' ' {
                                 puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char boxed");
-                                ui.place(pos, |ui: &mut Ui| {
-                                    Frame::default()
-                                        .stroke(Stroke::new(0.5, Color32::GRAY))
-                                        .show(ui, |ui| {
-                                            ui.add(
-                                                egui::Label::new(String::from(match val {
-                                                    0..=9 => val + b'0',
-                                                    10.. => val - 10 + b'A',
-                                                }
-                                                    as char))
-                                                .selectable(false),
-                                            )
-                                        })
-                                        .response
-                                });
+                                self.char_renderer.draw(
+                                    &mut mesh,
+                                    pos,
+                                    match val {
+                                        0..=9 => val + b'0',
+                                        10.. => val - 10 + b'A',
+                                    },
+                                    Color32::GRAY,
+                                );
+                                self.char_renderer.draw(&mut mesh, pos, b' ', Color32::GRAY);
                             } else if let Some(color) = get_color_of_bf_op(val) {
                                 puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char colored");
-                                char_renderer.draw(&mut mesh, pos, val, color);
+                                self.char_renderer.draw(&mut mesh, pos, val, color);
                             } else {
                                 puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char simple");
-                                char_renderer.draw(&mut mesh, pos, val, Color32::GRAY);
+                                self.char_renderer.draw(&mut mesh, pos, val, Color32::GRAY);
                             }
                         } else if self.settings.render_unicode
                             && let Ok(val) = val.try_into()
@@ -990,6 +1007,7 @@ impl App {
                             ui.place(pos, egui::Label::new(String::from(val)).selectable(false));
                         } else {
                             puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unknown");
+                            self.char_renderer.draw(&mut mesh, pos, b' ', Color32::GRAY);
                             ui.place(pos, |ui: &mut Ui| {
                                 // this is not great
                                 // i'm not really sure what the best way to do this would be
@@ -1021,18 +1039,12 @@ impl App {
                                     .collect::<Vec<_>>()
                                     .join("\n");
 
-                                Frame::default()
-                                    .stroke(Stroke::new(0.5, Color32::GRAY))
-                                    .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(str)
-                                                    .font(egui::FontId::monospace(font_size)),
-                                            )
-                                            .selectable(false),
-                                        )
-                                    })
-                                    .response
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(str).font(egui::FontId::monospace(font_size)),
+                                    )
+                                    .selectable(false),
+                                )
                             });
                         };
                     }
@@ -1077,12 +1089,13 @@ impl App {
                         ui.label(format!("Pos: {}, {}", popup_pos.0, popup_pos.1));
                         match &mut self.mode {
                             Mode::Playing { bf_state, .. } => {
-                                ui.label(format!(
-                                    "Val: {:#06x}",
-                                    bf_state.map.get_wrapped(popup_pos)
-                                ));
+                                let chr = bf_state.map.get_wrapped(popup_pos);
+                                ui.label(format!("Val: {chr:#06X}"));
+
+                                Self::dual_char_and_numeric_input(ui, &mut bf_state.map, popup_pos);
 
                                 let mut breakpoint = bf_state.breakpoints.contains(&popup_pos);
+                                // TODO: don't do hotkey if char/numeric input is selected
                                 ui.input(|e| {
                                     if e.key_pressed(egui::Key::B) {
                                         if breakpoint {
@@ -1102,9 +1115,11 @@ impl App {
                             }
                             Mode::Editing { fungespace, .. } => {
                                 ui.label(format!(
-                                    "Val: {:#06x}",
+                                    "Val: {:#06X}",
                                     fungespace.get_wrapped(popup_pos)
                                 ));
+
+                                Self::dual_char_and_numeric_input(ui, fungespace, popup_pos);
                             }
                         };
                     });
@@ -1487,6 +1502,96 @@ impl App {
         ui.heading("Set position");
         ui.add(egui::DragValue::new(x).speed(0.1));
         ui.add(egui::DragValue::new(y).speed(0.1));
+    }
+
+    fn dual_char_and_numeric_input(
+        ui: &mut egui::Ui,
+        fungespace: &mut FungeSpace,
+        pos: (i64, i64),
+    ) {
+        // TODO: clean this up & make the text input box a lil wider
+        let chr = fungespace.get_wrapped(pos);
+        ui.horizontal(|ui| {
+            let str = if let Ok(chr) = chr.try_into() {
+                match chr {
+                    0..7 => format!("\\{chr}"),
+                    7 => r"\a".to_string(),
+                    8 => r"\b".to_string(),
+                    9 => r"\t".to_string(),
+                    10 => r"\n".to_string(),
+                    11 => r"\v".to_string(),
+                    12 => r"\f".to_string(),
+                    13 => r"\r".to_string(),
+                    14..b' ' | b'~'.. => "❎".to_string(),
+                    b' ' => "⚫".to_string(),
+                    other => String::from(other as char),
+                }
+            } else {
+                String::from("❎")
+            };
+
+            let where_to_put_background = ui.painter().add(Shape::Noop);
+            let background_color = ui.visuals().text_edit_bg_color();
+            let label = Label::new(&str).sense(Sense::click()).selectable(false);
+            let output = ui.add(label);
+
+            if output.clicked() {
+                output.request_focus()
+            }
+
+            if output.has_focus() {
+                ui.input(|e| {
+                    if e.key_pressed(egui::Key::Backspace) {
+                        fungespace.set(pos, b' ' as i64);
+                    }
+
+                    for event in e.filtered_events(&egui::EventFilter {
+                        tab: false,
+                        escape: false,
+                        horizontal_arrows: false,
+                        vertical_arrows: false,
+                    }) {
+                        match event {
+                            egui::Event::Text(text) | egui::Event::Paste(text) => {
+                                if let Some(chr) = text.chars().last() {
+                                    fungespace.set(pos, chr as i64);
+                                }
+                            }
+                            _ => (),
+                        }
+                    }
+                })
+            }
+
+            // Most of this is taken straight from the egui code for
+            // TextEdit
+            let visuals = ui.style().interact(&output);
+            let frame_rect = output.rect.expand(visuals.expansion);
+            let shape = if output.has_focus() {
+                egui::epaint::RectShape::new(
+                    frame_rect,
+                    visuals.corner_radius,
+                    background_color,
+                    ui.visuals().selection.stroke,
+                    StrokeKind::Inside,
+                )
+            } else {
+                egui::epaint::RectShape::new(
+                    frame_rect,
+                    visuals.corner_radius,
+                    background_color,
+                    visuals.bg_stroke,
+                    StrokeKind::Inside,
+                )
+            };
+
+            ui.painter().set(where_to_put_background, shape);
+
+            let mut chr = chr;
+            if ui.add(egui::DragValue::new(&mut chr).speed(1.0)).changed() {
+                fungespace.set(pos, chr);
+            };
+        });
     }
 }
 
