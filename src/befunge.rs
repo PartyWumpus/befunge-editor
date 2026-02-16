@@ -156,7 +156,7 @@ impl FungeSpace {
         };
     }
 
-    pub fn get(&mut self, pos: (i64, i64)) -> Option<i64> {
+    pub fn get(&self, pos: (i64, i64)) -> Option<i64> {
         if pos.0 < 10 && pos.1 < 10 {
             Some(self.zero_page[usize::try_from(pos.0 + pos.1 * 10).unwrap()])
         } else {
@@ -164,7 +164,7 @@ impl FungeSpace {
         }
     }
 
-    pub fn get_wrapped(&mut self, pos: (i64, i64)) -> i64 {
+    pub fn get_wrapped(&self, pos: (i64, i64)) -> i64 {
         if pos.0 < 0 || pos.1 < 0 {
             return 0;
         }

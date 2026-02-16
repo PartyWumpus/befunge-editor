@@ -52,6 +52,7 @@ enum Mode {
     Playing {
         snapshot: FungeSpace,
         time_since_step: Instant,
+        time_since_avg: std::time::Instant,
         bf_state: Box<BefungeState>,
         running: bool,
         follow: bool,
@@ -130,11 +131,16 @@ impl CharRenderer {
             self.prev_fill_ratio = fill_ratio;
 
             for val in Self::MIN..=Self::MAX {
-                let str = if val == Self::MIN {
-                    // special case, draws a box
-                    String::from("⬜")
-                } else {
-                    String::from(val as char)
+                let str = match val {
+                    Self::MIN => {
+                        // special case used for rendering rectangles
+                        String::from("⬜")
+                    }
+                    b'^' => {
+                        // used so "^" is the same size as "v"
+                        String::from("v")
+                    }
+                    val => String::from(val as char),
                 };
 
                 let galley =
@@ -159,14 +165,14 @@ impl CharRenderer {
 
     fn draw(&self, mesh: &mut Mesh, egui_pos: Rect, val: u8, color: Color32) {
         assert!(val >= Self::MIN);
-        let val = val - Self::MIN;
-        let uv_pos = self.glyph_uv_position[val as usize];
-        let glyph_size = self.glyph_size[val as usize];
-        let glyph_offset = self.glyph_offset[val as usize];
+        let char_index = val - Self::MIN;
+        let uv_pos = self.glyph_uv_position[char_index as usize];
+        let glyph_size = self.glyph_size[char_index as usize];
+        let glyph_offset = self.glyph_offset[char_index as usize];
 
         static CENTERING_OFFSET: Vec2 = Vec2::new(1.5, -3.0); // eyeballed
 
-        let egui_pos = if val == 0 {
+        let egui_pos = if char_index == 0 {
             // special case, draws a box
             egui_pos
         } else {
@@ -176,29 +182,58 @@ impl CharRenderer {
             )
         };
 
-        let idx = mesh.vertices.len() as u32;
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: egui_pos.left_top(),
-            uv: uv_pos.left_top(),
-            color,
-        });
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: egui_pos.right_top(),
-            uv: uv_pos.right_top(),
-            color,
-        });
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: egui_pos.right_bottom(),
-            uv: uv_pos.right_bottom(),
-            color,
-        });
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: egui_pos.left_bottom(),
-            uv: uv_pos.left_bottom(),
-            color,
-        });
-        mesh.indices
-            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 3, idx]);
+        let mesh_index = mesh.vertices.len() as u32;
+        if val == b'^' {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.left_top(),
+                uv: uv_pos.left_bottom(),
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.right_top(),
+                uv: uv_pos.right_bottom(),
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.right_bottom(),
+                uv: uv_pos.right_top(),
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.left_bottom(),
+                uv: uv_pos.left_top(),
+                color,
+            });
+        } else {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.left_top(),
+                uv: uv_pos.left_top(),
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.right_top(),
+                uv: uv_pos.right_top(),
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.right_bottom(),
+                uv: uv_pos.right_bottom(),
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: egui_pos.left_bottom(),
+                uv: uv_pos.left_bottom(),
+                color,
+            });
+        }
+        mesh.indices.extend_from_slice(&[
+            mesh_index,
+            mesh_index + 1,
+            mesh_index + 2,
+            mesh_index + 2,
+            mesh_index + 3,
+            mesh_index,
+        ]);
     }
 }
 
@@ -277,6 +312,7 @@ impl Mode {
             Mode::Editing { fungespace, .. } => Mode::Playing {
                 snapshot: fungespace.clone(),
                 time_since_step: Instant::now(),
+                time_since_avg: std::time::Instant::now(),
                 bf_state: Box::new(BefungeState::new_from_fungespace(fungespace)),
                 running: false,
                 follow: false,
@@ -350,7 +386,6 @@ impl Mode {
                     _ => true,
                 };
                 if time_per_step {
-                    bf_state.instruction_count = 0;
                     match speed {
                         ..6 => {
                             Self::step_befunge_inner(bf_state, running, error_state, settings);
@@ -513,12 +548,63 @@ impl eframe::App for App {
                 ));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::warn_if_debug_build(ui);
+                    if cfg!(debug_assertions) {
+                        egui::warn_if_debug_build(ui);
+                        ui.separator();
+                    }
+                    ui.add(egui::Label::new(
+                        RichText::new(format!(
+                            "({:03}, {:03})",
+                            self.cursor_pos.0, self.cursor_pos.1
+                        ))
+                        .text_style(TextStyle::Monospace),
+                    ));
+                    ui.label("Position: ");
 
-                    ui.label(self.cursor_pos.0.to_string());
-                    ui.label(self.cursor_pos.1.to_string());
-                    if let Mode::Playing { bf_state, .. } = &self.mode {
-                        ui.label(bf_state.instruction_count.to_string());
+                    ui.separator();
+
+                    let fungespace = match &self.mode {
+                        Mode::Playing { bf_state, .. } => &bf_state.map,
+                        Mode::Editing { fungespace, .. } => fungespace,
+                    };
+                    ui.add(egui::Label::new(
+                        RichText::new(format!("{:04}", fungespace.get_wrapped(self.cursor_pos)))
+                            .text_style(TextStyle::Monospace),
+                    ));
+                    ui.label("Value: ");
+
+                    if let Mode::Playing {
+                        bf_state,
+                        time_since_avg,
+                        speed,
+                        ..
+                    } = &mut self.mode
+                        && *speed == 20
+                    {
+                        ui.separator();
+                        let now = std::time::Instant::now();
+                        let time_since = now.duration_since(*time_since_avg).as_micros();
+                        let hz =
+                            (bf_state.instruction_count as f64 * 1000000.0) / time_since as f64;
+                        let hz = match hz {
+                            -0.0..1_000.0 => {
+                                format!("~{:4}Hz", hz.round())
+                            }
+                            1_000.0..1_000_000.0 => {
+                                format!("~{:.1}KHz", hz / 1_000.0)
+                            }
+                            1_000_000.0.. => {
+                                format!("~{:.2}MHz", hz / 1_000_000.0)
+                            }
+                            _ => "? Hz".to_string(),
+                        };
+                        ui.add(egui::Label::new(
+                            RichText::new(hz).text_style(TextStyle::Monospace),
+                        ))
+                        .on_hover_text("Estimate is only vaguely accurate, calculated per frame.");
+                        ui.label("Speed: ");
+                        bf_state.instruction_count = 0;
+                        *time_since_avg = now;
                     };
                 });
             });
