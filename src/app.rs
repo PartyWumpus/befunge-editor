@@ -138,7 +138,7 @@ impl CharRenderer {
                 };
 
                 let galley =
-                    fonts.layout_no_wrap(str, egui::FontId::monospace(32.0), egui::Color32::WHITE);
+                    fonts.layout_no_wrap(str, egui::FontId::monospace(32.0), Color32::WHITE);
                 let row = galley.rows.first().unwrap();
                 let g = row.glyphs.first().unwrap();
                 self.glyph_uv_position[(val - Self::MIN) as usize] = Rect::from_two_pos(
@@ -872,57 +872,52 @@ impl App {
                                 StrokeKind::Outside,
                             );
                             for (pos, instant) in &bf_state.pos_history {
-                                let rect = recter(*pos, self.scene_offset);
                                 let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                                let mut mult = f32::log2(5.0 - time) - 1.322 - 0.3;
-                                if mult < 0.0 {
-                                    mult = 0.0
-                                }
 
-                                let [r, g, b] = self.settings.pos_history.1;
-                                painter.rect(
-                                    rect,
-                                    0.0,
-                                    Color32::from_rgb(r, g, b).gamma_multiply(mult),
-                                    Stroke::NONE,
-                                    StrokeKind::Outside,
-                                );
+                                if let Some(mult) = calculate_decay(time) {
+                                    let rect = recter(*pos, self.scene_offset);
+
+                                    let [r, g, b] = self.settings.pos_history.1;
+                                    painter.rect(
+                                        rect,
+                                        0.0,
+                                        Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                        Stroke::NONE,
+                                        StrokeKind::Outside,
+                                    );
+                                }
                             }
 
                             for (pos, instant) in &bf_state.put_history {
-                                let rect = recter(*pos, self.scene_offset);
                                 let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                                let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
-                                if mult < 0.0 {
-                                    mult = 0.0
-                                }
+                                if let Some(mult) = calculate_decay(time) {
+                                    let rect = recter(*pos, self.scene_offset);
 
-                                let [r, g, b] = self.settings.put_history.1;
-                                painter.rect(
-                                    rect,
-                                    0.0,
-                                    Color32::from_rgb(r, g, b).gamma_multiply(mult),
-                                    Stroke::NONE,
-                                    StrokeKind::Outside,
-                                );
+                                    let [r, g, b] = self.settings.put_history.1;
+                                    painter.rect(
+                                        rect,
+                                        0.0,
+                                        Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                        Stroke::NONE,
+                                        StrokeKind::Outside,
+                                    );
+                                }
                             }
 
                             for (pos, instant) in &bf_state.get_history {
-                                let rect = recter(*pos, self.scene_offset);
                                 let time = (instant.elapsed().as_millis() as f32) / 1000.0;
-                                let mut mult = f32::log2(5.0 - time) - 1.322 - 0.5;
-                                if mult < 0.0 {
-                                    mult = 0.0
-                                }
+                                if let Some(mult) = calculate_decay(time) {
+                                    let rect = recter(*pos, self.scene_offset);
 
-                                let [r, g, b] = self.settings.get_history.1;
-                                painter.rect(
-                                    rect,
-                                    0.0,
-                                    Color32::from_rgb(r, g, b).gamma_multiply(mult),
-                                    Stroke::NONE,
-                                    StrokeKind::Outside,
-                                );
+                                    let [r, g, b] = self.settings.get_history.1;
+                                    painter.rect(
+                                        rect,
+                                        0.0,
+                                        Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                        Stroke::NONE,
+                                        StrokeKind::Outside,
+                                    );
+                                }
                             }
 
                             for pos in &bf_state.breakpoints {
@@ -1593,6 +1588,15 @@ impl App {
             };
         });
     }
+}
+
+// could optimize by caching within a frame cuz there's likely to be a lot of identical timestamps
+fn calculate_decay(time: f32) -> Option<f32> {
+    if time >= 5.0 {
+        return None;
+    }
+    let mult = f32::log2(5.0 - time) - 1.322 - 0.3;
+    if mult <= 0.0 { None } else { Some(mult) }
 }
 
 fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
