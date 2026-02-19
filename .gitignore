@@ -17,3 +17,4 @@ flamegraph.svg
 
 # https://github.com/lycheeverse/lychee
 .lycheecache
+version.json

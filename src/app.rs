@@ -548,11 +548,14 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             puffin::profile_scope!("bottom panel");
             egui::MenuBar::new().ui(ui, |ui| {
-                powered_by_egui_and_eframe(ui);
-                ui.add(egui::github_link_file!(
-                    "https://github.com/PartyWumpus/befunge-editor/blob/main/",
-                    "Source code."
-                ));
+                // prob should figure out a better way of doing this instead of hardcoding 600
+                if ui.available_width() > 600.0 {
+                    powered_by_egui_and_eframe(ui);
+                    ui.add(egui::github_link_file!(
+                        "https://github.com/PartyWumpus/befunge-editor/blob/main/",
+                        "Source code."
+                    ));
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if cfg!(debug_assertions) {

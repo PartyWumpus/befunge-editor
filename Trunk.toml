@@ -1,2 +1,15 @@
 [build]
 no_sri = true
+no_autoreload = true
+filehash = false
+
+[watch]
+ignore = [ "version.json", ".direnv" ]
+
+[[hooks]]
+stage = "pre_build"
+command = "sh"
+command_arguments = [
+  "-c",
+  "printf '{\"version\":\"%s\"}' $(date +%s) > version.json"
+]

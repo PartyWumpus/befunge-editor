@@ -18,7 +18,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "Befunge editor",
         native_options,
         Box::new(|cc| Ok(Box::new(befunge_editor::App::new(cc)))),
     )
