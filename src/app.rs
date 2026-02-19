@@ -478,7 +478,7 @@ impl App {
             open_modal: None,
             mode: Mode::Editing {
                 cursor_state: CursorState::default(),
-                fungespace: FungeSpace::new(),
+                fungespace: FungeSpace::new(true),
             },
             texture: cc.egui_ctx.load_texture(
                 "noise",
@@ -536,7 +536,7 @@ impl eframe::App for App {
             if let Some(text) = text {
                 self.mode = Mode::Editing {
                     cursor_state: CursorState::default(),
-                    fungespace: FungeSpace::new_from_string(&text),
+                    fungespace: FungeSpace::new_from_string(&text, true),
                 }
             }
         }
@@ -766,6 +766,13 @@ impl App {
                     if e.key_pressed(egui::Key::Backspace) {
                         cursor_state.step_cursor_back();
                     }
+
+                    /*
+                    if e.modifiers.command && e.key_pressed(egui::Key::Z) {
+                        fungespace.undo();
+                        return;
+                    }
+                    */
 
                     for event in e.filtered_events(&egui::EventFilter {
                         tab: true,
@@ -1348,7 +1355,7 @@ impl App {
                     self.filename = None;
                     self.mode = Mode::Editing {
                         cursor_state: CursorState::default(),
-                        fungespace: FungeSpace::new(),
+                        fungespace: FungeSpace::new(true),
                     }
                 }
                 if ui.button("📂 Open").clicked() {
@@ -1410,6 +1417,7 @@ impl App {
                                 cursor_state: CursorState::default(),
                                 fungespace: FungeSpace::new_from_string(
                                     file.contents_utf8().unwrap(),
+                                    true,
                                 ),
                             }
                         }
@@ -1584,14 +1592,10 @@ impl App {
                     .min_size((1.0, 1.0))
                     .show(ui.ctx(), |ui| {
                         self.texture.set(
-                            egui::ColorImage {
-                                size: [graphics.size.0, graphics.size.1],
-                                source_size: Vec2::new(
-                                    graphics.size.0 as f32,
-                                    graphics.size.1 as f32,
-                                ),
-                                pixels: graphics.texture.clone(),
-                            },
+                            egui::ColorImage::new(
+                                [graphics.size.0, graphics.size.1],
+                                graphics.texture.clone(),
+                            ),
                             egui::TextureOptions::NEAREST,
                         );
 

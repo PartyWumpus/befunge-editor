@@ -18,6 +18,8 @@ use egui::ahash::HashMap;
 use gxhash::HashMap;
 */
 
+const MAX_IMAGE_SIZE: i64 = 10000;
+
 #[derive(Clone)]
 pub enum Direction {
     North,
@@ -53,6 +55,7 @@ pub struct FungeSpace {
     map: HashMap<(i64, i64), i64>,
     zero_page: Box<[i64; 100]>,
     pub max_size: (i64, i64),
+    undos: Option<VecDeque<((i64, i64), i64)>>,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -109,23 +112,21 @@ pub struct State {
     //pub input_number: i64,
 }
 
-impl Default for FungeSpace {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FungeSpace {
-    pub fn new() -> Self {
+    pub fn new(undo_enabled: bool) -> Self {
         Self {
             map: HashMap::default(),
             zero_page: Box::new([b' '.into(); 100]),
             max_size: (11, 11),
+            undos: if undo_enabled {
+                Some(VecDeque::new())
+            } else {
+                None
+            },
         }
     }
-
-    pub fn new_from_string(input: &str) -> Self {
-        let mut map = FungeSpace::new();
+    pub fn new_from_string(input: &str, undo_enabled: bool) -> Self {
+        let mut map = FungeSpace::new(undo_enabled);
         for (y, line) in input.lines().enumerate() {
             for (x, char) in line.chars().enumerate() {
                 map.set((x.try_into().unwrap(), y.try_into().unwrap()), char as i64);
@@ -135,6 +136,21 @@ impl FungeSpace {
     }
 
     pub fn set(&mut self, pos: (i64, i64), val: i64) {
+        if pos.0 < 0 || pos.1 < 0 {
+            return;
+        };
+
+        if self.undos.is_some() {
+            let old = self.get_wrapped(pos);
+            let undos = self.undos.as_mut().unwrap();
+            undos.push_back((pos, old));
+            undos.truncate(254);
+        }
+
+        self.set_inner(pos, val);
+    }
+
+    fn set_inner(&mut self, pos: (i64, i64), val: i64) {
         if pos.0 < 0 || pos.1 < 0 {
             return;
         };
@@ -173,6 +189,15 @@ impl FungeSpace {
         } else {
             *self.map.get(&pos).unwrap_or(&(b' ' as i64))
         }
+    }
+
+    pub fn undo(&mut self) -> Option<()> {
+        let Some(undos) = &mut self.undos else {
+            return None;
+        };
+        let (pos, val) = undos.pop_back()?;
+        self.set_inner(pos, val);
+        Some(())
     }
 
     pub fn entries(&mut self) -> impl Iterator<Item = ((i64, i64), i64)> {
@@ -232,7 +257,7 @@ impl Graphics {
         if x >= self.size.0 || y >= self.size.1 {
             return StepStatus::Error(Error::OutOfBoundsGraphics);
         }
-        // FIXME: error here on out of bounds
+
         let index = x + y * self.size.0;
         self.texture[index] = self.current_color;
         StepStatus::Normal
@@ -243,7 +268,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             instruction_count: 0,
-            map: FungeSpace::new(),
+            map: FungeSpace::new(false),
             string_mode: false,
             position: (0, 0),
             direction: Direction::East,
@@ -520,6 +545,10 @@ impl State {
                 // setup
                 let y = self.pop();
                 let x = self.pop();
+
+                if y <= 0 || x <= 0 || x > MAX_IMAGE_SIZE || y > MAX_IMAGE_SIZE {
+                    return StepStatus::Error(Error::OutOfBoundsGraphics);
+                }
 
                 self.graphics = Some(Graphics::new(x as usize, y as usize));
             }
