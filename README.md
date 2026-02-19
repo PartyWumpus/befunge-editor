@@ -13,8 +13,9 @@ To run: `cargo run --release`
 
 ## Features
 
+- All of befunge93
 - Breakpoints
-- Effectively infinite fungespace (up to 2^64)
+- Effectively infinite fungespace (up to the signed integer limit)
 - Supports (most of) the [befunge-with-graphics](https://github.com/Jachdich/befunge-with-graphics) operations
 
 ## Features I would like to add in future:
@@ -23,9 +24,10 @@ To run: `cargo run --release`
 - Watching the values of locations (like befunexec)
 - Breakpoints that pause on value change
 - Some of the preprocessor things from befunexec (break & watch, but not replace)
-- An easier way to move the screen large distances. Possibly a "minimap" style thing?
+- A better way to move the screen large distances. Possibly a "minimap" style thing?
 - Undo in editor mode
-- Step backwards in play mode
+- Undo in play mode
+- A befunge98 mode?
 
 
 ## Thanks

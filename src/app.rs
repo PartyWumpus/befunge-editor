@@ -17,8 +17,9 @@ use crate::befunge::{Event, FungeSpace, StepStatus, get_color_of_bf_op};
 use crate::{BefungeState, befunge};
 
 static PRESETS: Dir = include_dir!("./bf_programs");
+static CURSOR_COLOR: Color32 = Color32::from_rgb(110, 200, 255);
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 enum Direction {
     North,
     South,
@@ -27,7 +28,7 @@ enum Direction {
     West,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 pub struct CursorState {
     location: (i64, i64),
     direction: Direction,
@@ -52,7 +53,7 @@ enum Mode {
     Playing {
         snapshot: FungeSpace,
         time_since_step: Instant,
-        time_since_avg: std::time::Instant,
+        time_since_avg: Instant,
         bf_state: Box<BefungeState>,
         running: bool,
         follow: bool,
@@ -244,7 +245,10 @@ enum ModalState {
 
 pub struct App {
     texture: TextureHandle,
-    text_channel: (Sender<String>, Receiver<String>),
+    text_channel: (
+        Sender<(String, Option<String>)>,
+        Receiver<(String, Option<String>)>,
+    ),
     settings: Settings,
     mode: Mode,
     scene_rect: Rect,
@@ -253,6 +257,7 @@ pub struct App {
     cursor_pos: (i64, i64),
     popup_pos: Option<(i64, i64)>,
     char_renderer: CharRenderer,
+    filename: Option<String>,
 }
 
 fn poss(pos: (f32, f32)) -> Pos2 {
@@ -312,7 +317,7 @@ impl Mode {
             Mode::Editing { fungespace, .. } => Mode::Playing {
                 snapshot: fungespace.clone(),
                 time_since_step: Instant::now(),
-                time_since_avg: std::time::Instant::now(),
+                time_since_avg: Instant::now(),
                 bf_state: Box::new(BefungeState::new_from_fungespace(fungespace)),
                 running: false,
                 follow: false,
@@ -385,6 +390,7 @@ impl Mode {
                     6..=19 => elapsed >= Duration::from_millis((1000.0 / 32.0) as u64),
                     _ => true,
                 };
+                let now = Instant::now();
                 if time_per_step {
                     match speed {
                         ..6 => {
@@ -414,31 +420,28 @@ impl Mode {
                                 };
                             }
                         }
-                        16..=20 => {
-                            let now = Instant::now();
-                            loop {
-                                for _ in 0..10000 {
-                                    if Self::step_befunge_inner(
-                                        bf_state,
-                                        running,
-                                        error_state,
-                                        settings,
-                                    ) {
-                                        return;
-                                    }
-                                }
-                                if now.elapsed()
-                                    > Duration::from_millis(match *speed - 16 {
-                                        0 => 4,
-                                        1 => 8,
-                                        2 => 16,
-                                        _ => 32,
-                                    })
-                                {
-                                    break;
+                        16..=20 => loop {
+                            for _ in 0..10000 {
+                                if Self::step_befunge_inner(
+                                    bf_state,
+                                    running,
+                                    error_state,
+                                    settings,
+                                ) {
+                                    return;
                                 }
                             }
-                        }
+                            if now.elapsed()
+                                > Duration::from_millis(match *speed - 16 {
+                                    0 => 4,
+                                    1 => 8,
+                                    2 => 16,
+                                    _ => 32,
+                                })
+                            {
+                                break;
+                            }
+                        },
                         _ => unreachable!(),
                     }
 
@@ -483,6 +486,7 @@ impl App {
                 egui::TextureOptions::NEAREST,
             ),
             char_renderer: CharRenderer::empty(),
+            filename: None,
         }
     }
 }
@@ -527,10 +531,13 @@ impl eframe::App for App {
             }
         }
 
-        if let Ok(text) = self.text_channel.1.try_recv() {
-            self.mode = Mode::Editing {
-                cursor_state: CursorState::default(),
-                fungespace: FungeSpace::new_from_string(&text),
+        if let Ok((filename, text)) = self.text_channel.1.try_recv() {
+            self.filename = Some(filename);
+            if let Some(text) = text {
+                self.mode = Mode::Editing {
+                    cursor_state: CursorState::default(),
+                    fungespace: FungeSpace::new_from_string(&text),
+                }
             }
         }
 
@@ -582,7 +589,7 @@ impl eframe::App for App {
                         && *speed == 20
                     {
                         ui.separator();
-                        let now = std::time::Instant::now();
+                        let now = Instant::now();
                         let time_since = now.duration_since(*time_since_avg).as_micros();
                         let hz =
                             (bf_state.instruction_count as f64 * 1000000.0) / time_since as f64;
@@ -620,39 +627,22 @@ impl eframe::App for App {
             puffin::profile_scope!("central panel");
 
             ui.horizontal(|ui| {
-                ui.heading("befunge editor");
-                if let Mode::Playing {
-                    error_state: Some(error),
-                    ..
-                } = &self.mode
-                {
-                    ui.label(RichText::new(error.to_string()).color(Color32::RED));
-                };
-            });
-
-            let text = match self.mode {
-                Mode::Editing { .. } => "To Interpreter Mode",
-                Mode::Playing { .. } => "To Editor Mode",
-            };
-            if ui.button(text).clicked() {
-                self.mode.swap_mode();
-            }
-
-            if let Mode::Playing {
-                bf_state,
-                running,
-                follow,
-                speed,
-                error_state,
-                ..
-            } = &mut self.mode
-            {
-                ui.horizontal(|ui| {
-                    if error_state.is_some() {
-                        ui.disable();
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("step").clicked() {
+                puffin::profile_scope!("control bar");
+                match &mut self.mode {
+                    Mode::Playing {
+                        bf_state,
+                        running,
+                        follow,
+                        speed,
+                        error_state,
+                        snapshot,
+                        ..
+                    } => {
+                        if error_state.is_some() {
+                            ui.disable();
+                        }
+                        if ui.button("⏵ Step").clicked() {
+                            *running = false;
                             Mode::step_befunge_inner(
                                 bf_state,
                                 running,
@@ -660,15 +650,44 @@ impl eframe::App for App {
                                 &self.settings,
                             );
                         }
-                        ui.checkbox(running, "play");
+                        if ui
+                            .button(if *running { "⏸ Pause" } else { "▶ Play" })
+                            .clicked()
+                        {
+                            *running = !(*running);
+                        };
+                        if ui.button("Reset").clicked() {
+                            *running = false;
+                            *error_state = None;
+                            // teeny bit wasteful
+                            let breakpoints = bf_state.breakpoints.clone();
+                            **bf_state = BefungeState::new_from_fungespace(snapshot.clone());
+                            bf_state.breakpoints = breakpoints;
+                        };
                         ui.checkbox(follow, "follow");
-                    });
 
-                    ui.horizontal(|ui| {
                         ui.add(egui::Slider::new(speed, 1..=20).text("speed"));
-                    });
-                });
-            }
+                    }
+                    Mode::Editing { cursor_state, .. } => {
+                        ui.label("Cursor direction:");
+                        ui.label(match cursor_state.direction {
+                            Direction::North => "⬆",
+                            Direction::South => "⬇",
+                            Direction::East => "➡",
+                            Direction::West => "⬅",
+                        });
+
+                        ui.label("Cursor mode:");
+                        ui.label(if cursor_state.string_mode {
+                            "String"
+                        } else {
+                            "Normal"
+                        });
+                    }
+                }
+            });
+
+            ui.add_space(3.0);
 
             egui::Frame::group(ui.style())
                 .inner_margin(0.0)
@@ -687,76 +706,110 @@ impl eframe::App for App {
 impl App {
     fn befunge_input(&mut self, ui: &mut egui::Ui) {
         puffin::profile_function!();
-        if let Mode::Editing {
-            cursor_state,
-            fungespace,
-        } = &mut self.mode
-        {
-            ui.input(|e| {
-                if let Some(direction) = if e.key_pressed(egui::Key::ArrowDown) {
-                    Some(Direction::South)
-                } else if e.key_pressed(egui::Key::ArrowUp) {
-                    Some(Direction::North)
-                } else if e.key_pressed(egui::Key::ArrowLeft) {
-                    Some(Direction::West)
-                } else if e.key_pressed(egui::Key::ArrowRight) {
-                    Some(Direction::East)
-                } else {
-                    None
-                } {
-                    cursor_state.direction = direction;
-                    cursor_state.step();
-                };
+        ui.input(|e| {
+            if e.modifiers.command && e.key_pressed(egui::Key::Enter) {
+                self.mode.swap_mode();
+            }
+            match &mut self.mode {
+                Mode::Playing {
+                    bf_state,
+                    running,
+                    snapshot,
+                    error_state,
+                    follow,
+                    ..
+                } => {
+                    if e.key_pressed(egui::Key::R) {
+                        *running = false;
+                        *error_state = None;
+                        // teeny bit wasteful
+                        let breakpoints = bf_state.breakpoints.clone();
+                        **bf_state = BefungeState::new_from_fungespace(snapshot.clone());
+                        bf_state.breakpoints = breakpoints;
+                    }
 
-                if e.key_pressed(egui::Key::Backspace) {
-                    cursor_state.step_cursor_back();
-                }
+                    if e.key_pressed(egui::Key::F) {
+                        *follow = !(*follow);
+                    }
 
-                for event in e.filtered_events(&egui::EventFilter {
-                    tab: true,
-                    escape: false,
-                    horizontal_arrows: true,
-                    vertical_arrows: true,
-                }) {
-                    match event {
-                        egui::Event::Text(text) => {
-                            for char in text.chars() {
-                                fungespace.set(cursor_state.location, char as i64);
+                    if e.key_pressed(egui::Key::Space) {
+                        *running = !(*running);
+                    }
 
-                                if char == '"' {
-                                    cursor_state.string_mode = !cursor_state.string_mode;
-                                };
-
-                                if !cursor_state.string_mode {
-                                    match char {
-                                        '>' => cursor_state.direction = Direction::East,
-                                        'v' => cursor_state.direction = Direction::South,
-                                        '<' => cursor_state.direction = Direction::West,
-                                        '^' => cursor_state.direction = Direction::North,
-                                        _ => (),
-                                    }
-                                }
-
-                                cursor_state.step();
-                            }
-                        }
-                        egui::Event::Paste(text) => {
-                            let (mut x, mut y) = cursor_state.location;
-                            for char in text.chars() {
-                                if char == '\n' {
-                                    y += 1;
-                                    x = cursor_state.location.0;
-                                    continue;
-                                };
-                                fungespace.set((x, y), char as i64);
-                                x += 1
-                            }
-                        }
-                        _ => (),
+                    if e.key_pressed(egui::Key::ArrowRight) {
+                        *running = false;
+                        Mode::step_befunge_inner(bf_state, running, error_state, &self.settings);
                     }
                 }
-            });
-        }
+                Mode::Editing {
+                    cursor_state,
+                    fungespace,
+                } => {
+                    if let Some(direction) = if e.key_pressed(egui::Key::ArrowDown) {
+                        Some(Direction::South)
+                    } else if e.key_pressed(egui::Key::ArrowUp) {
+                        Some(Direction::North)
+                    } else if e.key_pressed(egui::Key::ArrowLeft) {
+                        Some(Direction::West)
+                    } else if e.key_pressed(egui::Key::ArrowRight) {
+                        Some(Direction::East)
+                    } else {
+                        None
+                    } {
+                        cursor_state.direction = direction;
+                        cursor_state.step();
+                    };
+
+                    if e.key_pressed(egui::Key::Backspace) {
+                        cursor_state.step_cursor_back();
+                    }
+
+                    for event in e.filtered_events(&egui::EventFilter {
+                        tab: true,
+                        escape: false,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                    }) {
+                        match event {
+                            egui::Event::Text(text) => {
+                                for char in text.chars() {
+                                    fungespace.set(cursor_state.location, char as i64);
+
+                                    if char == '"' {
+                                        cursor_state.string_mode = !cursor_state.string_mode;
+                                    };
+
+                                    if !cursor_state.string_mode {
+                                        match char {
+                                            '>' => cursor_state.direction = Direction::East,
+                                            'v' => cursor_state.direction = Direction::South,
+                                            '<' => cursor_state.direction = Direction::West,
+                                            '^' => cursor_state.direction = Direction::North,
+                                            _ => (),
+                                        }
+                                    }
+
+                                    cursor_state.step();
+                                }
+                            }
+                            egui::Event::Paste(text) => {
+                                let (mut x, mut y) = cursor_state.location;
+                                for char in text.chars() {
+                                    if char == '\n' {
+                                        y += 1;
+                                        x = cursor_state.location.0;
+                                        continue;
+                                    };
+                                    fungespace.set((x, y), char as i64);
+                                    x += 1
+                                }
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn befunge_scene(&mut self, ui: &mut egui::Ui) {
@@ -931,6 +984,25 @@ impl App {
                         ],
                         Stroke::new(1.0, Color32::from_gray(50)),
                     );
+
+                    const SHOW_OFFSET: bool = false;
+                    if SHOW_OFFSET {
+                        painter.line_segment(
+                            [
+                                Pos2::new(clip_rect.left(), 0.0),
+                                Pos2::new(clip_rect.right(), 0.0),
+                            ],
+                            Stroke::new(1.0, Color32::from_gray(50)),
+                        );
+
+                        painter.line_segment(
+                            [
+                                Pos2::new(0.0, clip_rect.top()),
+                                Pos2::new(0.0, clip_rect.bottom()),
+                            ],
+                            Stroke::new(1.0, Color32::from_gray(50)),
+                        );
+                    }
                 }
 
                 {
@@ -1025,9 +1097,25 @@ impl App {
                                 if cursor_state.string_mode {
                                     Color32::LIGHT_GREEN
                                 } else {
-                                    Color32::LIGHT_BLUE
+                                    CURSOR_COLOR
                                 },
                                 Stroke::new(0.25, Color32::from_gray(90)),
+                                StrokeKind::Inside,
+                            );
+
+                            let mut cursor_copy = *cursor_state;
+                            cursor_copy.step();
+
+                            painter.rect(
+                                recter(cursor_copy.location, self.scene_offset),
+                                0.0,
+                                if cursor_state.string_mode {
+                                    Color32::LIGHT_GREEN
+                                } else {
+                                    CURSOR_COLOR
+                                }
+                                .gamma_multiply_u8(80),
+                                Stroke::NONE,
                                 StrokeKind::Inside,
                             );
                         }
@@ -1045,10 +1133,19 @@ impl App {
                         Mode::Editing { fungespace, .. } => fungespace,
                     };
 
-                    let integer_clip_rect = (
+                    let mut integer_clip_rect = (
                         poss_reverse(clip_rect.left_top(), self.scene_offset),
                         poss_reverse(clip_rect.right_bottom(), self.scene_offset),
                     );
+
+                    // fixes bug near edges of screen
+                    if integer_clip_rect.1.0 < i64::MIN + 100000 {
+                        integer_clip_rect.1.0 = i64::MAX;
+                    }
+
+                    if integer_clip_rect.1.1 < i64::MIN + 100000 {
+                        integer_clip_rect.1.1 = i64::MAX;
+                    }
 
                     for (pos, val) in map.entries() {
                         if !intersects(integer_clip_rect, pos) || val == ' ' as i64 {
@@ -1170,13 +1267,10 @@ impl App {
                         ui.label(format!("Pos: {}, {}", popup_pos.0, popup_pos.1));
                         match &mut self.mode {
                             Mode::Playing { bf_state, .. } => {
-                                let chr = bf_state.map.get_wrapped(popup_pos);
-                                ui.label(format!("Val: {chr:#06X}"));
-
                                 Self::dual_char_and_numeric_input(ui, &mut bf_state.map, popup_pos);
 
                                 let mut breakpoint = bf_state.breakpoints.contains(&popup_pos);
-                                // TODO: don't do hotkey if char/numeric input is selected
+                                // FIXME: don't do hotkey if char/numeric input is selected
                                 ui.input(|e| {
                                     if e.key_pressed(egui::Key::B) {
                                         if breakpoint {
@@ -1195,11 +1289,6 @@ impl App {
                                 };
                             }
                             Mode::Editing { fungespace, .. } => {
-                                ui.label(format!(
-                                    "Val: {:#06X}",
-                                    fungespace.get_wrapped(popup_pos)
-                                ));
-
                                 Self::dual_char_and_numeric_input(ui, fungespace, popup_pos);
                             }
                         };
@@ -1253,6 +1342,7 @@ impl App {
             let is_web = cfg!(target_arch = "wasm32");
             ui.menu_button("File", |ui| {
                 if ui.button("📄 New").clicked() {
+                    self.filename = None;
                     self.mode = Mode::Editing {
                         cursor_state: CursorState::default(),
                         fungespace: FungeSpace::new(),
@@ -1269,14 +1359,23 @@ impl App {
                         let file = task.await;
                         if let Some(file) = file {
                             let text = file.read().await;
-                            let _ = sender.send(String::from_utf8_lossy(&text).to_string());
+                            let _ = sender.send((
+                                file.file_name(),
+                                Some(String::from_utf8_lossy(&text).to_string()),
+                            ));
                             ctx.request_repaint();
                         }
                     });
                 }
 
                 if ui.button("💾 Save").clicked() {
-                    let task = rfd::AsyncFileDialog::new().save_file();
+                    let sender = self.text_channel.0.clone();
+                    let mut task = rfd::AsyncFileDialog::new();
+                    if let Some(filename) = &self.filename {
+                        task = task.set_file_name(filename);
+                    }
+
+                    let task = task.save_file();
                     let contents = match &mut self.mode {
                         Mode::Playing { bf_state, .. } => bf_state.map.serialize(),
                         Mode::Editing { fungespace, .. } => fungespace.serialize(),
@@ -1286,6 +1385,7 @@ impl App {
                         let file = task.await;
                         if let Some(file) = file {
                             _ = file.write(contents.as_bytes()).await;
+                            let _ = sender.send((file.file_name(), None));
                         }
                     });
                 }
@@ -1296,6 +1396,13 @@ impl App {
                             .button(file.path().file_stem().unwrap().to_string_lossy())
                             .clicked()
                         {
+                            self.filename = Some(
+                                file.path()
+                                    .file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
                             self.mode = Mode::Editing {
                                 cursor_state: CursorState::default(),
                                 fungespace: FungeSpace::new_from_string(
@@ -1374,12 +1481,6 @@ impl App {
                     "Display non-ascii characters",
                 );
 
-                if !is_web {
-                    let mut profile = puffin::are_scopes_on();
-                    ui.checkbox(&mut profile, "Enable UI profiling");
-                    puffin::set_scopes_on(profile);
-                }
-
                 let settings_button =
                     egui::Button::new("Advanced settings").right_text(SubMenuButton::RIGHT_ARROW);
 
@@ -1388,14 +1489,65 @@ impl App {
                 };
             });
 
+            ui.menu_button("View", |ui| {
+                if ui.button("Show whole program").clicked() {
+                    self.scene_offset = (0, 0);
+                    let fungespace = match &self.mode {
+                        Mode::Playing { bf_state, .. } => &bf_state.map,
+                        Mode::Editing { fungespace, .. } => fungespace,
+                    };
+                    self.scene_rect = Rect::from_min_max(
+                        poss((-1.0, -1.0)),
+                        poss((
+                            (fungespace.max_size.0 + 2) as f32,
+                            (fungespace.max_size.1 + 2) as f32,
+                        )),
+                    );
+                };
+            });
+
             ui.menu_button("Tools", |ui| {
+                if !is_web {
+                    let mut profile = puffin::are_scopes_on();
+                    ui.checkbox(&mut profile, "Enable UI profiling");
+                    puffin::set_scopes_on(profile);
+                }
+
                 if ui.button("Set viewport position").clicked() {
                     self.open_modal = Some(ModalState::SetPosition(0, 0));
                 };
             });
-            ui.add_space(8.0);
 
-            egui::widgets::global_theme_preference_buttons(ui);
+            egui::widgets::global_theme_preference_switch(ui);
+
+            ui.separator();
+
+            let mode = match self.mode {
+                Mode::Editing { .. } => false,
+                Mode::Playing { .. } => true,
+            };
+
+            if ui.add(egui::Button::selectable(!mode, "Edit")).clicked() && mode {
+                self.mode.swap_mode();
+            };
+
+            if ui.add(egui::Button::selectable(mode, "Run")).clicked() && !mode {
+                self.mode.swap_mode();
+            };
+
+            if let Mode::Playing {
+                error_state: Some(error),
+                ..
+            } = &self.mode
+            {
+                ui.label(RichText::new(error.to_string()).color(Color32::RED));
+            }
+
+            if let Some(filename) = &self.filename {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(filename);
+                });
+            }
         });
     }
 
@@ -1484,16 +1636,9 @@ impl App {
             ui.label("Stack:");
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(2.0);
-                // TODO: as part of making this use a vecdeque<char>
-                // make it unpause if the cursor is currently on a `~`
-                // (not `&`, as that can be multichar)
-                // and the text was empty before
-                // teechnically this logic would be wrong if a user
-                // paused ontop of a `~` while there was input
-                // and then deleted the input, and then started typing
-                // but like ¯\_(ツ)_/¯ there aren't any users
-                let resp = ui.text_edit_singleline(&mut bf_state.input_buffer);
-                if resp.changed() {
+
+                let resp = ui.text_edit_multiline(&mut bf_state.input_buffer);
+                if resp.changed() && bf_state.map.get_wrapped(bf_state.position) == b'~' as i64 {
                     *running = true
                 }
                 ui.label("Input:");
@@ -1603,7 +1748,7 @@ impl App {
                     11 => r"\v".to_string(),
                     12 => r"\f".to_string(),
                     13 => r"\r".to_string(),
-                    14..b' ' | b'~'.. => "❎".to_string(),
+                    14..b' ' | 127.. => "❎".to_string(),
                     b' ' => "⚫".to_string(),
                     other => String::from(other as char),
                 }

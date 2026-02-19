@@ -52,7 +52,7 @@ impl Direction {
 pub struct FungeSpace {
     map: HashMap<(i64, i64), i64>,
     zero_page: Box<[i64; 100]>,
-    max_size: (i64, i64),
+    pub max_size: (i64, i64),
 }
 
 #[derive(Debug, Clone, Error)]
@@ -120,7 +120,7 @@ impl FungeSpace {
         Self {
             map: HashMap::default(),
             zero_page: Box::new([b' '.into(); 100]),
-            max_size: (100, 100),
+            max_size: (11, 11),
         }
     }
 
@@ -278,8 +278,8 @@ impl State {
     }
 
     pub fn step_position(&mut self, settings: &Settings) {
-        self.step_position_inner();
         let (x, y) = self.position;
+        self.step_position_inner();
         if settings.pos_history.0 {
             if let Some(prev_time) = self.pos_history.get(&(x, y)) {
                 if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
@@ -633,10 +633,9 @@ pub fn get_color_of_bf_op(op: u8) -> Option<Color32> {
 
         b'p' | b'g' => OpTypes::Modification,
 
-        b'&' | b'~' | b'.' | b',' => OpTypes::IO,
+        b'&' | b'~' | b'.' | b',' | b'@' => OpTypes::IO,
 
         b's' | b'f' | b'x' | b'c' | b'u' | b'l' | b'z' => OpTypes::Graphics,
-        b'@' => OpTypes::None,
 
         // noop
         _ => OpTypes::None,
