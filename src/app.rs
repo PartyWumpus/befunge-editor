@@ -13,20 +13,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
-use crate::befunge::{Event, FungeSpace, StepStatus, get_color_of_bf_op};
+use crate::befunge::{Direction, Event, FungeSpace, StepStatus, get_color_of_bf_op};
 use crate::{BefungeState, befunge};
 
 static PRESETS: Dir = include_dir!("./bf_programs");
 static CURSOR_COLOR: Color32 = Color32::from_rgb(110, 200, 255);
-
-#[derive(Default, Clone, Copy)]
-enum Direction {
-    North,
-    South,
-    #[default]
-    East,
-    West,
-}
+static PROFILE_EACH_CHAR: bool = false;
 
 #[derive(Default, Clone, Copy)]
 pub struct CursorState {
@@ -76,6 +68,7 @@ pub struct Settings {
     pub put_history: (bool, [u8; 3]),
     pub skip_spaces: bool,
     pub render_unicode: bool,
+    pub run_until_breakpoint: bool,
     pub invalid_operation_behaviour: InvalidOperationBehaviour,
 }
 
@@ -86,6 +79,7 @@ impl Default for Settings {
             get_history: (false, [255, 0, 0]),
             put_history: (true, [0, 255, 0]),
             skip_spaces: false,
+            run_until_breakpoint: false,
             render_unicode: true,
             invalid_operation_behaviour: InvalidOperationBehaviour::Halt,
         }
@@ -341,7 +335,7 @@ impl Mode {
     ) -> bool {
         let step_state = bf_state.step(settings);
         match step_state {
-            StepStatus::Normal => false,
+            StepStatus::Normal | StepStatus::NormalNoStep => false,
             StepStatus::Breakpoint => {
                 *running = false;
                 true
@@ -356,6 +350,7 @@ impl Mode {
                     }
                     IOpBehav::Halt => {
                         *error_state = Some(error);
+                        *running = false;
                         true
                     }
                     IOpBehav::Ignore => {
@@ -364,10 +359,11 @@ impl Mode {
                     }
                 }
             }
+            StepStatus::SyncFrame => true,
         }
     }
 
-    fn step_befunge(&mut self, ctx: &egui::Context, settings: &Settings) {
+    fn step_befunge(&mut self, settings: &Settings) {
         puffin::profile_function!();
         match self {
             Mode::Editing { .. } => (),
@@ -379,6 +375,14 @@ impl Mode {
                 error_state,
                 ..
             } => {
+                if settings.run_until_breakpoint && *speed == 20 {
+                    loop {
+                        if Self::step_befunge_inner(bf_state, running, error_state, settings) {
+                            return;
+                        }
+                    }
+                }
+
                 let elapsed = time_since_step.elapsed();
                 let time_per_step = match speed {
                     0 => unreachable!(),
@@ -404,7 +408,7 @@ impl Mode {
                                     error_state,
                                     settings,
                                 ) {
-                                    return;
+                                    break;
                                 };
                             }
                         }
@@ -416,11 +420,11 @@ impl Mode {
                                     error_state,
                                     settings,
                                 ) {
-                                    return;
+                                    break;
                                 };
                             }
                         }
-                        16..=20 => loop {
+                        16..=20 => 'loopy: loop {
                             for _ in 0..10000 {
                                 if Self::step_befunge_inner(
                                     bf_state,
@@ -428,7 +432,7 @@ impl Mode {
                                     error_state,
                                     settings,
                                 ) {
-                                    return;
+                                    break 'loopy;
                                 }
                             }
                             if now.elapsed()
@@ -444,11 +448,8 @@ impl Mode {
                         },
                         _ => unreachable!(),
                     }
-
                     *time_since_step = Instant::now();
                 }
-
-                ctx.request_repaint_after(std::time::Duration::from_millis((1000.0 / 30.0) as u64));
             }
         }
     }
@@ -459,6 +460,10 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
+
+        cc.egui_ctx.style_mut(|style| {
+            style.url_in_tooltip = true;
+        });
 
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
@@ -514,20 +519,14 @@ impl eframe::App for App {
 
         self.char_renderer.update(ctx);
 
-        let dur = std::time::Duration::from_millis(5000);
-        if let Mode::Playing {
-            ref mut time_since_step,
-            running,
-            ..
-        } = self.mode
+        if let Mode::Playing { running, speed, .. } = self.mode
+            && running
         {
-            if time_since_step.elapsed() > dur.into() {
-                ctx.request_repaint_after(dur);
-                *time_since_step = Instant::now();
-            }
-
-            if running {
-                self.mode.step_befunge(ctx, &self.settings);
+            self.mode.step_befunge(&self.settings);
+            if speed == 20 {
+                ctx.request_repaint_after(std::time::Duration::from_millis(0));
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis((1000.0 / 33.0) as u64));
             }
         }
 
@@ -611,7 +610,7 @@ impl eframe::App for App {
                         ui.add(egui::Label::new(
                             RichText::new(hz).text_style(TextStyle::Monospace),
                         ))
-                        .on_hover_text("Estimate is only vaguely accurate, calculated per frame.");
+                        .on_hover_text("Estimate is only vaguely accurate, calculated per frame.\nWhen skip spaces is on, this estimate is totally wrong.");
                         ui.label("Speed: ");
                         bf_state.instruction_count = 0;
                         *time_since_avg = now;
@@ -907,6 +906,26 @@ impl App {
                 // Border lines
                 {
                     puffin::profile_scope!("border");
+
+                    // cross at 0,0
+                    if false {
+                        painter.line_segment(
+                            [
+                                Pos2::new(clip_rect.left(), 0.0),
+                                Pos2::new(clip_rect.right(), 0.0),
+                            ],
+                            Stroke::new(1.0, Color32::RED),
+                        );
+
+                        painter.line_segment(
+                            [
+                                Pos2::new(0.0, clip_rect.top()),
+                                Pos2::new(0.0, clip_rect.bottom()),
+                            ],
+                            Stroke::new(1.0, Color32::RED),
+                        );
+                    }
+
                     // Top line
                     painter.line_segment(
                         [
@@ -1020,9 +1039,10 @@ impl App {
                     match &mut self.mode {
                         Mode::Playing { bf_state, .. } => {
                             // TODO: move this somewhere more sensible
+                            let now = Instant::now();
                             bf_state
                                 .pos_history
-                                .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
+                                .retain(|_, v| v.time_since(now) < Duration::from_millis(5000));
 
                             bf_state
                                 .put_history
@@ -1033,26 +1053,103 @@ impl App {
                                 .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
                             painter.rect(
-                                recter(bf_state.position, self.scene_offset),
+                                recter(bf_state.position, self.scene_offset).shrink(1.0),
                                 0.0,
                                 Color32::PURPLE,
                                 Stroke::NONE,
                                 StrokeKind::Outside,
                             );
-                            for (pos, instant) in &bf_state.pos_history {
-                                let time = (instant.elapsed().as_millis() as f32) / 1000.0;
+
+                            for (pos, visited) in &bf_state.pos_history {
+                                let time = (visited.time_since(now).as_millis() as f32) / 1000.0;
 
                                 if let Some(mult) = calculate_decay(time) {
                                     let rect = recter(*pos, self.scene_offset);
-
+                                    let pos = poss((
+                                        (pos.0 - self.scene_offset.0) as f32,
+                                        (pos.1 - self.scene_offset.1) as f32,
+                                    ));
                                     let [r, g, b] = self.settings.pos_history.1;
+
                                     painter.rect(
-                                        rect,
+                                        rect.shrink(1.0),
                                         0.0,
                                         Color32::from_rgb(r, g, b).gamma_multiply(mult),
                                         Stroke::NONE,
                                         StrokeKind::Outside,
                                     );
+
+                                    if visited.wawa.north()
+                                        && let Some(mult) = calculate_decay(
+                                            now.duration_since(visited.north).as_millis() as f32
+                                                / 1000.0,
+                                        )
+                                    {
+                                        painter.rect(
+                                            Rect::from_min_max(
+                                                pos + Vec2::new(1.0, -1.0),
+                                                pos + Vec2::new(12.0, 1.0),
+                                            ),
+                                            0.0,
+                                            Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                            Stroke::NONE,
+                                            StrokeKind::Outside,
+                                        );
+                                    }
+
+                                    if visited.wawa.south()
+                                        && let Some(mult) = calculate_decay(
+                                            now.duration_since(visited.south).as_millis() as f32
+                                                / 1000.0,
+                                        )
+                                    {
+                                        painter.rect(
+                                            Rect::from_min_max(
+                                                pos + Vec2::new(1.0, 16.0),
+                                                pos + Vec2::new(12.0, 18.0),
+                                            ),
+                                            0.0,
+                                            Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                            Stroke::NONE,
+                                            StrokeKind::Outside,
+                                        );
+                                    }
+
+                                    if visited.wawa.east()
+                                        && let Some(mult) = calculate_decay(
+                                            now.duration_since(visited.east).as_millis() as f32
+                                                / 1000.0,
+                                        )
+                                    {
+                                        painter.rect(
+                                            Rect::from_min_max(
+                                                pos + Vec2::new(12.0, 1.0),
+                                                pos + Vec2::new(14.0, 16.0),
+                                            ),
+                                            0.0,
+                                            Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                            Stroke::NONE,
+                                            StrokeKind::Outside,
+                                        );
+                                    }
+
+                                    if visited.wawa.west()
+                                        && let Some(mult) = calculate_decay(
+                                            now.duration_since(visited.west).as_millis() as f32
+                                                / 1000.0,
+                                        )
+                                    {
+                                        painter.rect(
+                                            Rect::from_min_max(
+                                                pos + Vec2::new(-1.0, 1.0),
+                                                pos + Vec2::new(1.0, 16.0),
+                                            ),
+                                            0.0,
+                                            Color32::from_rgb(r, g, b).gamma_multiply(mult),
+                                            Stroke::NONE,
+                                            StrokeKind::Outside,
+                                        );
+                                    }
                                 }
                             }
 
@@ -1132,8 +1229,6 @@ impl App {
                     };
                 }
 
-                static PROFILE_EACH_CHAR: bool = false;
-
                 {
                     puffin::profile_scope!("chars");
 
@@ -1157,85 +1252,42 @@ impl App {
                         integer_clip_rect.1.1 = i64::MAX;
                     }
 
+                    if integer_clip_rect.0.0 < i64::MIN + 100000 {
+                        integer_clip_rect.0.0 = i64::MAX;
+                    }
+
+                    if integer_clip_rect.0.1 < i64::MIN + 100000 {
+                        integer_clip_rect.0.1 = i64::MAX;
+                    }
+
+                    for x in integer_clip_rect.0.0.max(0)..=integer_clip_rect.1.0 {
+                        for y in integer_clip_rect.0.1.max(0)..=integer_clip_rect.1.1 {
+                            let pos = recter((x, y), self.scene_offset);
+                            if let Some(val) = map.get((x, y))
+                                && val != b' ' as i64
+                            {
+                                App::draw_char(
+                                    ui,
+                                    &self.char_renderer,
+                                    &mut mesh,
+                                    &self.settings,
+                                    pos,
+                                    val,
+                                );
+                            }
+                        }
+                    }
+
+                    /*
                     for (pos, val) in map.entries() {
                         if !intersects(integer_clip_rect, pos) || val == ' ' as i64 {
                             continue;
                         }
 
                         let pos = recter(pos, self.scene_offset);
-
-                        //puffin::profile_scope!("char");
-
-                        if let Ok(val) = TryInto::<u8>::try_into(val) {
-                            if val < b' ' {
-                                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char boxed");
-                                self.char_renderer.draw(
-                                    &mut mesh,
-                                    pos,
-                                    match val {
-                                        0..=9 => val + b'0',
-                                        10.. => val - 10 + b'A',
-                                    },
-                                    Color32::GRAY,
-                                );
-                                self.char_renderer.draw(&mut mesh, pos, b' ', Color32::GRAY);
-                            } else if let Some(color) = get_color_of_bf_op(val) {
-                                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char colored");
-                                self.char_renderer.draw(&mut mesh, pos, val, color);
-                            } else {
-                                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char simple");
-                                self.char_renderer.draw(&mut mesh, pos, val, Color32::GRAY);
-                            }
-                        } else if self.settings.render_unicode
-                            && let Ok(val) = val.try_into()
-                            && let Some(val) = char::from_u32(val)
-                            && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
-                        {
-                            puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unicode");
-                            ui.place(pos, egui::Label::new(String::from(val)).selectable(false));
-                        } else {
-                            puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unknown");
-                            self.char_renderer.draw(&mut mesh, pos, b' ', Color32::GRAY);
-                            ui.place(pos, |ui: &mut Ui| {
-                                // this is not great
-                                // i'm not really sure what the best way to do this would be
-                                let str = format!("{val:X}");
-                                let n = str.len();
-                                let font_size = match n {
-                                    ..=1 => 16.0,
-                                    2 => 8.0,
-                                    3..=6 => 6.0,
-                                    7..16 => 4.0,
-                                    16.. => 3.2,
-                                };
-
-                                let ranges: &[Range<usize>] = match n {
-                                    0..4 => &[0..n],
-                                    4 => &[0..2, 2..n],
-                                    5 | 6 => &[0..3, 3..n],
-                                    7 | 8 | 9 => &[0..3, 3..6, 6..n],
-                                    10 => &[0..4, 4..7, 7..n],
-                                    11 | 12 => &[0..4, 4..8, 8..n],
-                                    13 => &[0..5, 5..9, 9..n],
-                                    14 | 15 => &[0..5, 5..10, 10..n],
-                                    16.. => &[0..4, 4..8, 8..12, 12..n],
-                                };
-
-                                let str = ranges
-                                    .iter()
-                                    .map(|range| &str[range.clone()])
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(str).font(egui::FontId::monospace(font_size)),
-                                    )
-                                    .selectable(false),
-                                )
-                            });
-                        };
+                        App::draw_char(ui, &self.char_renderer, &mut mesh, &self.settings, pos, val);
                     }
+                    */
 
                     ui.painter().add(egui::Shape::Mesh(mesh.into()));
                 }
@@ -1645,7 +1697,10 @@ impl App {
                 ui.add_space(2.0);
 
                 let resp = ui.text_edit_multiline(&mut bf_state.input_buffer);
-                if resp.changed() && bf_state.map.get_wrapped(bf_state.position) == b'~' as i64 {
+                if resp.changed()
+                    && let Some(val) = bf_state.map.get(bf_state.position)
+                    && (val == b'~' as i64 || val == b'&' as i64)
+                {
                     *running = true
                 }
                 ui.label("Input:");
@@ -1725,6 +1780,8 @@ impl App {
         });
         ui.horizontal(|ui| ui.checkbox(&mut settings.get_history.0, "Enabled"));
 
+        ui.horizontal(|ui| ui.checkbox(&mut settings.run_until_breakpoint, "Run until breakpoint"));
+
         ui.separator();
         if ui.button("Reset all settings").clicked() {
             *settings = Settings::default();
@@ -1735,6 +1792,83 @@ impl App {
         ui.heading("Set position");
         ui.add(egui::DragValue::new(x).speed(0.1));
         ui.add(egui::DragValue::new(y).speed(0.1));
+    }
+
+    fn draw_char(
+        ui: &mut egui::Ui,
+        char_renderer: &CharRenderer,
+        mesh: &mut Mesh,
+        settings: &Settings,
+        pos: Rect,
+        val: i64,
+    ) {
+        if let Ok(val) = TryInto::<u8>::try_into(val) {
+            if val < b' ' {
+                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char boxed");
+                char_renderer.draw(
+                    mesh,
+                    pos,
+                    match val {
+                        0..=9 => val + b'0',
+                        10.. => val - 10 + b'A',
+                    },
+                    Color32::GRAY,
+                );
+                char_renderer.draw(mesh, pos, b' ', Color32::GRAY);
+            } else if let Some(color) = get_color_of_bf_op(val) {
+                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char colored");
+                char_renderer.draw(mesh, pos, val, color);
+            } else {
+                puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char simple");
+                char_renderer.draw(mesh, pos, val, Color32::GRAY);
+            }
+        } else if settings.render_unicode
+            && let Ok(val) = val.try_into()
+            && let Some(val) = char::from_u32(val)
+            && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
+        {
+            puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unicode");
+            ui.place(pos, egui::Label::new(String::from(val)).selectable(false));
+        } else {
+            puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unknown");
+            char_renderer.draw(mesh, pos, b' ', Color32::GRAY);
+            ui.place(pos, |ui: &mut Ui| {
+                // this is not great
+                // i'm not really sure what the best way to do this would be
+                let str = format!("{val:X}");
+                let n = str.len();
+                let font_size = match n {
+                    ..=1 => 16.0,
+                    2 => 8.0,
+                    3..=6 => 6.0,
+                    7..16 => 4.0,
+                    16.. => 3.2,
+                };
+
+                let ranges: &[Range<usize>] = match n {
+                    0..4 => &[0..n],
+                    4 => &[0..2, 2..n],
+                    5 | 6 => &[0..3, 3..n],
+                    7 | 8 | 9 => &[0..3, 3..6, 6..n],
+                    10 => &[0..4, 4..7, 7..n],
+                    11 | 12 => &[0..4, 4..8, 8..n],
+                    13 => &[0..5, 5..9, 9..n],
+                    14 | 15 => &[0..5, 5..10, 10..n],
+                    16.. => &[0..4, 4..8, 8..12, 12..n],
+                };
+
+                let str = ranges
+                    .iter()
+                    .map(|range| &str[range.clone()])
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                ui.add(
+                    egui::Label::new(RichText::new(str).font(egui::FontId::monospace(font_size)))
+                        .selectable(false),
+                )
+            });
+        };
     }
 
     fn dual_char_and_numeric_input(

@@ -1,5 +1,6 @@
 use clipline::AnyOctant;
 //use rand::{distr::StandardUniform, prelude::*};
+use bitfield_struct::bitfield;
 use coarsetime::{Duration, Instant};
 use egui::{
     Color32,
@@ -20,12 +21,65 @@ use gxhash::HashMap;
 
 const MAX_IMAGE_SIZE: i64 = 10000;
 
-#[derive(Clone)]
+#[derive(Default, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
 pub enum Direction {
     North,
     South,
+    #[default]
     East,
     West,
+}
+
+#[bitfield(u8)]
+pub struct WhereVisited {
+    pub north: bool,
+    pub south: bool,
+    pub east: bool,
+    pub west: bool,
+    #[bits(4)]
+    __: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct Visited {
+    // used instead of 4 Option<Instant>s, to save space
+    pub wawa: WhereVisited,
+    pub north: Instant,
+    pub south: Instant,
+    pub east: Instant,
+    pub west: Instant,
+}
+
+impl Default for Visited {
+    fn default() -> Self {
+        Self {
+            wawa: WhereVisited::new(),
+            north: Instant::recent(),
+            south: Instant::recent(),
+            east: Instant::recent(),
+            west: Instant::recent(),
+        }
+    }
+}
+
+impl Visited {
+    pub fn time_since(&self, t: Instant) -> Duration {
+        let mut dur = Duration::from_u64(u64::MAX);
+        if self.wawa.north() {
+            dur = dur.min(t.duration_since(self.north));
+        }
+        if self.wawa.south() {
+            dur = dur.min(t.duration_since(self.south));
+        }
+        if self.wawa.east() {
+            dur = dur.min(t.duration_since(self.east));
+        }
+        if self.wawa.west() {
+            dur = dur.min(t.duration_since(self.west));
+        }
+
+        dur
+    }
 }
 
 impl Direction {
@@ -73,8 +127,10 @@ pub enum Error {
 #[derive(Debug)]
 pub enum StepStatus {
     Normal,
+    NormalNoStep,
     Breakpoint,
     Error(Error),
+    SyncFrame,
 }
 
 #[derive(Clone)]
@@ -100,7 +156,7 @@ pub struct State {
     pub string_mode: bool,
     pub position: (i64, i64),
     pub direction: Direction,
-    pub pos_history: HashMap<(i64, i64), Instant>,
+    pub pos_history: HashMap<(i64, i64), Visited>,
     pub get_history: HashMap<(i64, i64), Instant>,
     pub put_history: HashMap<(i64, i64), Instant>,
     pub stack: Vec<i64>,
@@ -160,8 +216,9 @@ impl FungeSpace {
         } else {
             if val == b' ' as i64 {
                 self.map.remove(&pos);
+            } else {
+                self.map.insert(pos, val);
             }
-            self.map.insert(pos, val);
 
             if pos.0 > self.max_size.0 {
                 self.max_size.0 = pos.0
@@ -253,7 +310,7 @@ impl Graphics {
         }
     }
 
-    pub fn pixel(&mut self, x: usize, y: usize) -> StepStatus {
+    fn pixel(&mut self, x: usize, y: usize) -> StepStatus {
         if x >= self.size.0 || y >= self.size.1 {
             return StepStatus::Error(Error::OutOfBoundsGraphics);
         }
@@ -306,12 +363,51 @@ impl State {
         let (x, y) = self.position;
         self.step_position_inner();
         if settings.pos_history.0 {
-            if let Some(prev_time) = self.pos_history.get(&(x, y)) {
-                if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
-                    self.pos_history.insert((x, y), Instant::recent());
+            if let Some(visited) = self.pos_history.get_mut(&(x, y)) {
+                match self.direction {
+                    Direction::North => {
+                        visited.wawa.set_north(true);
+                        visited.north = Instant::recent();
+                    }
+                    Direction::South => {
+                        visited.wawa.set_south(true);
+                        visited.south = Instant::recent();
+                    }
+                    Direction::East => {
+                        visited.wawa.set_east(true);
+                        visited.east = Instant::recent();
+                    }
+                    Direction::West => {
+                        visited.wawa.set_west(true);
+                        visited.west = Instant::recent();
+                    }
                 }
             } else {
-                self.pos_history.insert((x, y), Instant::recent());
+                self.pos_history.insert(
+                    (x, y),
+                    match self.direction {
+                        Direction::North => Visited {
+                            wawa: WhereVisited::new().with_north(true),
+                            north: Instant::recent(),
+                            ..Default::default()
+                        },
+                        Direction::South => Visited {
+                            wawa: WhereVisited::new().with_south(true),
+                            south: Instant::recent(),
+                            ..Default::default()
+                        },
+                        Direction::East => Visited {
+                            wawa: WhereVisited::new().with_east(true),
+                            east: Instant::recent(),
+                            ..Default::default()
+                        },
+                        Direction::West => Visited {
+                            wawa: WhereVisited::new().with_west(true),
+                            west: Instant::recent(),
+                            ..Default::default()
+                        },
+                    },
+                );
             }
         }
     }
@@ -325,20 +421,17 @@ impl State {
             Direction::West => self.position = (x - 1, y),
         }
 
-        if self.position.0 < 0 {
-            self.position.0 = self.map.max_size.0 + 1;
-        };
-        if self.position.1 < 0 {
-            self.position.1 = self.map.max_size.1 + 1;
-        };
-
-        if self.position.0 > self.map.max_size.0 + 1 {
+        if self.position.0 == -1 {
+            self.position.0 = self.map.max_size.0.saturating_add(1);
+        } else if self.position.0.wrapping_sub(1) >= self.map.max_size.0 {
             self.position.0 = 0
-        }
+        };
 
-        if self.position.1 > self.map.max_size.1 + 1 {
+        if self.position.1 == -1 {
+            self.position.1 = self.map.max_size.1.saturating_add(1);
+        } else if self.position.1.wrapping_sub(1) >= self.map.max_size.1 {
             self.position.1 = 0
-        }
+        };
     }
 
     pub fn step(&mut self, settings: &Settings) -> StepStatus {
@@ -372,16 +465,25 @@ impl State {
             } else {
                 self.stack.push(op);
             }
-        } else if let Some(op) = op
-            && let Ok(op) = op.try_into()
-        {
-            match self.do_op(op, settings) {
-                res @ (StepStatus::Breakpoint | StepStatus::Error(..)) => return res,
-                StepStatus::Normal => (),
+            self.step_position(settings);
+            StepStatus::Normal
+        } else if let Some(op) = op {
+            if let Ok(op) = op.try_into() {
+                let status = self.do_op(op, settings);
+                match status {
+                    StepStatus::Normal | StepStatus::SyncFrame => {
+                        self.step_position(settings);
+                    }
+                    _ => (),
+                };
+                status
+            } else {
+                StepStatus::Error(Error::InvalidOperation)
             }
+        } else {
+            self.step_position(settings);
+            StepStatus::Normal
         }
-        self.step_position(settings);
-        StepStatus::Normal
     }
 
     fn do_op(&mut self, op: u8, settings: &Settings) -> StepStatus {
@@ -453,7 +555,11 @@ impl State {
             b'<' => self.direction = Direction::West,
             b'^' => self.direction = Direction::North,
             b'v' => self.direction = Direction::South,
-            b'#' => self.step_position_inner(), // skip forwards one
+            b'#' => {
+                self.step_position(settings);
+                self.step_position_inner();
+                return StepStatus::NormalNoStep;
+            }
 
             // dynamic direction changes
             //b'?' => self.direction = (rand::rng()).random(),
@@ -573,8 +679,12 @@ impl State {
             b'x' => {
                 // set pixel
                 if let Some(graphics) = &mut self.graphics {
-                    let y: usize = self.stack.pop().unwrap_or(0).try_into().unwrap();
-                    let x: usize = self.stack.pop().unwrap_or(0).try_into().unwrap();
+                    let Ok(y) = self.stack.pop().unwrap_or(0).try_into() else {
+                        return StepStatus::Error(Error::OutOfBoundsGraphics);
+                    };
+                    let Ok(x) = self.stack.pop().unwrap_or(0).try_into() else {
+                        return StepStatus::Error(Error::OutOfBoundsGraphics);
+                    };
 
                     return graphics.pixel(x, y);
                 }
@@ -588,7 +698,7 @@ impl State {
                 }
             }
 
-            b'u' => (), // update (noop for now)
+            b'u' => return StepStatus::SyncFrame, // update (noop for now)
 
             b'l' => {
                 // line
