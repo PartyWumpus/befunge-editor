@@ -2015,55 +2015,15 @@ fn calculate_decay(time: f32) -> Option<f32> {
     if mult <= 0.0 { None } else { Some(mult) }
 }
 
-// midly jank but works for now :)
 fn checkbox_with_underline(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> Response {
-    puffin::profile_function!();
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-
-    let text_size = ui
-        .fonts(|f| f.layout_no_wrap(text.to_string(), font_id.clone(), Color32::WHITE))
-        .size();
-
-    let spacing = ui.spacing();
-    let width = spacing.icon_spacing + spacing.icon_width + text_size.x;
-    let width = spacing.interact_size.x.max(width);
-    let height = spacing.interact_size.y.max(text_size.y);
-
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
-
-    let color = if ui.rect_contains_pointer(rect.expand2(Vec2::new(
-        ui.spacing().item_spacing.x / 2.0,
-        ui.spacing().item_spacing.y / 2.0,
-    ))) {
-        ui.style().visuals.widgets.hovered.text_color()
-    } else {
-        ui.style().visuals.widgets.inactive.text_color()
-    };
-
-    let mut job = egui::text::LayoutJob::default();
-
-    job.append(
-        &text[..1],
-        0.0,
-        egui::TextFormat {
-            font_id: font_id.clone(),
-            color,
-            underline: egui::Stroke::new(1.0, color),
-            ..Default::default()
-        },
-    );
-
-    job.append(
-        &text[1..],
-        0.0,
-        egui::TextFormat {
-            font_id,
-            color,
-            ..Default::default()
-        },
-    );
-
-    ui.put(rect, egui::Checkbox::new(checked, job))
+    ui.scope(|ui| {
+        ui.spacing_mut().icon_spacing = 0.0;
+        ui.checkbox(
+            checked,
+            (" ", RichText::new(&text[..1]).underline(), &text[1..]),
+        )
+    })
+    .inner
 }
 
 fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
