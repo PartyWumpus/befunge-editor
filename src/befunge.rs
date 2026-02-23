@@ -117,6 +117,8 @@ pub struct FungeSpace {
 pub enum Error {
     #[error("Invalid operation")]
     InvalidOperation,
+    #[error("Invalid UTF-8 char")]
+    InvalidChar,
     #[error("Division by zero")]
     DivisionByZero,
     #[error("Out of bounds graphics operation")]
@@ -664,7 +666,9 @@ impl State {
                 self.output.push(' ');
             }
             b',' => {
-                let a = (self.pop() as u32).try_into().unwrap();
+                let Ok(a) = (self.pop() as u32).try_into() else {
+                    return StepStatus::Error(Error::InvalidChar);
+                };
                 self.output.push(a);
             }
 

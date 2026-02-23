@@ -36,6 +36,7 @@ puffin_egui = { git = "https://github.com/EmbarkStudios/puffin.git" }
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git" } 
 bitfield-struct = "0.12.1"
 rand_derive2 = "0.1.21"
+egui_material_icons = "0.4.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5.37", features = ["derive"] }

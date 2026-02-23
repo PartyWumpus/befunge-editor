@@ -4,7 +4,8 @@ use egui::emath::TSTransform;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
 use egui::{
-    FontId, Id, Label, LayerId, Mesh, Modal, RichText, ScrollArea, Shape, StrokeKind, TextStyle,
+    FontId, Id, Label, LayerId, Mesh, Modal, Response, RichText, ScrollArea, Shape, StrokeKind,
+    TextStyle,
 };
 use include_dir::{Dir, include_dir};
 use std::future::Future;
@@ -465,6 +466,8 @@ impl App {
             style.url_in_tooltip = true;
         });
 
+        egui_material_icons::initialize(&cc.egui_ctx);
+
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         let settings = if let Some(storage) = cc.storage {
@@ -640,25 +643,55 @@ impl eframe::App for App {
                         snapshot,
                         ..
                     } => {
-                        if error_state.is_some() {
-                            ui.disable();
-                        }
-                        if ui.button("⏵ Step").clicked() {
-                            *running = false;
-                            Mode::step_befunge_inner(
-                                bf_state,
-                                running,
-                                error_state,
-                                &self.settings,
-                            );
-                        }
+                        ui.scope(|ui| {
+                            if error_state.is_some() {
+                                ui.disable();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui_material_icons::icons::ICON_STEP.to_string()
+                                            + "  Step",
+                                    )
+                                    .shortcut_text(
+                                        egui_material_icons::icons::ICON_ARROW_RIGHT_ALT,
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                *running = false;
+                                Mode::step_befunge_inner(
+                                    bf_state,
+                                    running,
+                                    error_state,
+                                    &self.settings,
+                                );
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(if *running {
+                                        egui_material_icons::icons::ICON_PAUSE.to_string()
+                                            + "  Pause"
+                                    } else {
+                                        egui_material_icons::icons::ICON_PLAY_ARROW.to_string()
+                                            + "  Play"
+                                    })
+                                    .shortcut_text(egui_material_icons::icons::ICON_SPACE_BAR),
+                                )
+                                .clicked()
+                            {
+                                *running = !(*running);
+                            };
+                        });
                         if ui
-                            .button(if *running { "⏸ Pause" } else { "▶ Play" })
+                            .add(
+                                egui::Button::new(
+                                    egui_material_icons::icons::ICON_REPLAY.to_string() + "  Reset",
+                                )
+                                .shortcut_text("R"),
+                            )
                             .clicked()
                         {
-                            *running = !(*running);
-                        };
-                        if ui.button("Reset").clicked() {
                             *running = false;
                             *error_state = None;
                             // teeny bit wasteful
@@ -666,7 +699,8 @@ impl eframe::App for App {
                             **bf_state = BefungeState::new_from_fungespace(snapshot.clone());
                             bf_state.breakpoints = breakpoints;
                         };
-                        ui.checkbox(follow, "follow");
+
+                        checkbox_with_underline(ui, follow, "Follow");
 
                         ui.add(egui::Slider::new(speed, 1..=20).text("speed"));
                     }
@@ -734,13 +768,20 @@ impl App {
                         *follow = !(*follow);
                     }
 
-                    if e.key_pressed(egui::Key::Space) {
-                        *running = !(*running);
-                    }
+                    if error_state.is_none() {
+                        if e.key_pressed(egui::Key::Space) {
+                            *running = !(*running);
+                        }
 
-                    if e.key_pressed(egui::Key::ArrowRight) {
-                        *running = false;
-                        Mode::step_befunge_inner(bf_state, running, error_state, &self.settings);
+                        if e.key_pressed(egui::Key::ArrowRight) {
+                            *running = false;
+                            Mode::step_befunge_inner(
+                                bf_state,
+                                running,
+                                error_state,
+                                &self.settings,
+                            );
+                        }
                     }
                 }
                 Mode::Editing {
@@ -1342,7 +1383,9 @@ impl App {
                                         }
                                     }
                                 });
-                                if ui.checkbox(&mut breakpoint, "Breakpoint").clicked() {
+                                if checkbox_with_underline(ui, &mut breakpoint, "Breakpoint")
+                                    .clicked()
+                                {
                                     if breakpoint {
                                         bf_state.breakpoints.insert(popup_pos);
                                     } else {
@@ -1780,6 +1823,7 @@ impl App {
         });
         ui.horizontal(|ui| ui.checkbox(&mut settings.get_history.0, "Enabled"));
 
+        ui.separator();
         ui.horizontal(|ui| ui.checkbox(&mut settings.run_until_breakpoint, "Run until breakpoint"));
 
         ui.separator();
@@ -1890,7 +1934,7 @@ impl App {
                     12 => r"\f".to_string(),
                     13 => r"\r".to_string(),
                     14..b' ' | 127.. => "❎".to_string(),
-                    b' ' => "⚫".to_string(),
+                    b' ' => egui_material_icons::icons::ICON_SPACE_BAR.to_string(),
                     other => String::from(other as char),
                 }
             } else {
@@ -1969,6 +2013,57 @@ fn calculate_decay(time: f32) -> Option<f32> {
     }
     let mult = f32::log2(5.0 - time) - 1.322 - 0.3;
     if mult <= 0.0 { None } else { Some(mult) }
+}
+
+// midly jank but works for now :)
+fn checkbox_with_underline(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> Response {
+    puffin::profile_function!();
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+
+    let text_size = ui
+        .fonts(|f| f.layout_no_wrap(text.to_string(), font_id.clone(), Color32::WHITE))
+        .size();
+
+    let spacing = ui.spacing();
+    let width = spacing.icon_spacing + spacing.icon_width + text_size.x;
+    let width = spacing.interact_size.x.max(width);
+    let height = spacing.interact_size.y.max(text_size.y);
+
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+
+    let color = if ui.rect_contains_pointer(rect.expand2(Vec2::new(
+        ui.spacing().item_spacing.x / 2.0,
+        ui.spacing().item_spacing.y / 2.0,
+    ))) {
+        ui.style().visuals.widgets.hovered.text_color()
+    } else {
+        ui.style().visuals.widgets.inactive.text_color()
+    };
+
+    let mut job = egui::text::LayoutJob::default();
+
+    job.append(
+        &text[..1],
+        0.0,
+        egui::TextFormat {
+            font_id: font_id.clone(),
+            color,
+            underline: egui::Stroke::new(1.0, color),
+            ..Default::default()
+        },
+    );
+
+    job.append(
+        &text[1..],
+        0.0,
+        egui::TextFormat {
+            font_id,
+            color,
+            ..Default::default()
+        },
+    );
+
+    ui.put(rect, egui::Checkbox::new(checked, job))
 }
 
 fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
