@@ -697,7 +697,7 @@ impl eframe::App for App {
                     ui.set_min_height(100.0);
 
                     self.befunge_scene(ui);
-                    if self.open_modal.is_none() {
+                    if self.open_modal.is_none() && ctx.memory(|mem| mem.focused().is_none()) {
                         self.befunge_input(ui);
                     }
                 });
