@@ -30,12 +30,13 @@
 
             # wayland libraries
             wayland
+            dbus
 
             # x11 libraries
-            xorg.libXcursor
-            xorg.libXrandr
-            xorg.libXi
-            xorg.libX11
+            libxcursor
+            libxrandr
+            libxi
+            libx11
 
           ];
 

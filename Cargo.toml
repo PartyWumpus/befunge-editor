@@ -10,8 +10,8 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 [dependencies]
-egui = "0.32.2"
-eframe = { version = "^0.32", default-features = false, features = [
+egui = "0.33.0"
+eframe = { version = "^0.33", default-features = false, features = [
     "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
@@ -24,19 +24,19 @@ log = "0.4.27"
 serde = { version = "1.0.219", features = ["derive"] }
 clipline = "0.3.0"
 coarsetime = "0.1.36"
-rfd = "0.15.3"
+rfd = "0.17"
 futures = "0.3.31"
 thiserror = "2.0.15"
 include_dir = "0.7.4"
-
+bitfield-struct = "0.12.1"
 rand = "0.8"
+rand_derive2 = "0.1.21"
+egui_material_icons = "0.5.0"
 
 # in theory these can be removed from the web build
-puffin_egui = { git = "https://github.com/EmbarkStudios/puffin.git" } 
-puffin = { git = "https://github.com/EmbarkStudios/puffin.git" } 
-bitfield-struct = "0.12.1"
-rand_derive2 = "0.1.21"
-egui_material_icons = "0.4.0"
+puffin_egui = { git = "https://github.com/blip-radar/puffin.git", branch = "egui-0.33" }
+puffin = { git = "https://github.com/blip-radar/puffin.git", branch = "egui-0.33" }
+
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5.37", features = ["derive"] }

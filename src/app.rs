@@ -117,7 +117,7 @@ impl CharRenderer {
 
         static DIVISOR: f32 = 2.0;
 
-        ctx.fonts(|fonts| {
+        ctx.fonts_mut(|fonts| {
             let size = fonts.font_image_size();
 
             let fill_ratio = fonts.font_atlas_fill_ratio();
@@ -1824,7 +1824,7 @@ impl App {
         ui.horizontal(|ui| ui.checkbox(&mut settings.get_history.0, "Enabled"));
 
         ui.separator();
-        ui.horizontal(|ui| ui.checkbox(&mut settings.run_until_breakpoint, "Run until breakpoint"));
+        ui.horizontal(|ui| ui.checkbox(&mut settings.run_until_breakpoint, "Run until breakpoint (DANGER)").on_hover_text("Will freeze the UI while working.\nIf there are no breakpoints then this effectively crashes the app."));
 
         ui.separator();
         if ui.button("Reset all settings").clicked() {
@@ -1869,7 +1869,7 @@ impl App {
         } else if settings.render_unicode
             && let Ok(val) = val.try_into()
             && let Some(val) = char::from_u32(val)
-            && ui.fonts(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
+            && ui.fonts_mut(|fonts| fonts.has_glyph(&egui::FontId::monospace(1.0), val))
         {
             puffin::profile_scope_if!(PROFILE_EACH_CHAR, "char unicode");
             ui.place(pos, egui::Label::new(String::from(val)).selectable(false));
