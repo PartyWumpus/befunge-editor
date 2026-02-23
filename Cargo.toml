@@ -29,10 +29,13 @@ futures = "0.3.31"
 thiserror = "2.0.15"
 include_dir = "0.7.4"
 
+rand = "0.8"
+
 # in theory these can be removed from the web build
 puffin_egui = { git = "https://github.com/EmbarkStudios/puffin.git" } 
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git" } 
 bitfield-struct = "0.12.1"
+rand_derive2 = "0.1.21"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
@@ -40,6 +43,7 @@ env_logger = "0.11.8"
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-futures = "0.4.50"
 web-sys = "0.3.70"              # to access the DOM (to hide the loading text)
 

@@ -1,11 +1,12 @@
-use clipline::AnyOctant;
-//use rand::{distr::StandardUniform, prelude::*};
 use bitfield_struct::bitfield;
+use clipline::AnyOctant;
 use coarsetime::{Duration, Instant};
 use egui::{
     Color32,
     ahash::{HashSet, HashSetExt},
 };
+use rand::Rng;
+use rand_derive2::RandGen;
 use std::{collections::VecDeque, iter};
 use thiserror::Error;
 
@@ -21,7 +22,7 @@ use gxhash::HashMap;
 
 const MAX_IMAGE_SIZE: i64 = 10000;
 
-#[derive(Default, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
+#[derive(RandGen, Default, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
 pub enum Direction {
     North,
     South,
@@ -120,8 +121,8 @@ pub enum Error {
     DivisionByZero,
     #[error("Out of bounds graphics operation")]
     OutOfBoundsGraphics,
-    #[error("& is not yet supported")]
-    TodoAmpersand,
+    #[error("Invalid input for &")]
+    InvalidNumber,
 }
 
 #[derive(Debug)]
@@ -562,7 +563,7 @@ impl State {
             }
 
             // dynamic direction changes
-            //b'?' => self.direction = (rand::rng()).random(),
+            b'?' => self.direction = rand::thread_rng().r#gen(),
             b'_' => {
                 let status = self.pop();
                 if status == 0 {
@@ -618,7 +619,28 @@ impl State {
             }
 
             // input
-            b'&' => return StepStatus::Error(Error::TodoAmpersand),
+            b'&' => {
+                // FIXME TODO oh my god use a vecdqueue i beg
+                let mut itr = self.input_buffer.chars();
+                let mut num = 0;
+                loop {
+                    match itr.next() {
+                        None => return StepStatus::Breakpoint,
+                        Some(val @ '0'..='9') => {
+                            num *= 10;
+                            num += (val as u8 - b'0') as i64;
+                        }
+                        Some(' ') => {
+                            self.stack.push(num);
+                            self.input_buffer = itr.as_str().into();
+                            return StepStatus::Normal;
+                        }
+                        Some(_) => {
+                            return StepStatus::Error(Error::InvalidNumber);
+                        }
+                    }
+                }
+            }
 
             b'~' => {
                 // FIXME TODO oh my god use a vecdqueue i beg
