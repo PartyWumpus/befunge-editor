@@ -1,4 +1,5 @@
 use coarsetime::{Duration, Instant};
+use const_format::concatcp;
 use egui::containers::menu::SubMenuButton;
 use egui::emath::TSTransform;
 use egui::scroll_area::ScrollBarVisibility;
@@ -26,6 +27,11 @@ static CTRL: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl + "
 };
+macro_rules! icon {
+    ($icon:expr, $text:expr) => {
+        const_format::concatcp!($icon, "\u{2009}", $text)
+    };
+}
 
 #[derive(Default, Clone, Copy)]
 pub struct CursorState {
@@ -688,7 +694,7 @@ impl eframe::App for App {
                             }
                             if ui
                                 .add(
-                                    egui::Button::new(icons::ICON_STEP.to_string() + "  Step")
+                                    egui::Button::new(icon!(icons::ICON_STEP, "Step"))
                                         .shortcut_text(icons::ICON_ARROW_RIGHT_ALT),
                                 )
                                 .clicked()
@@ -704,9 +710,9 @@ impl eframe::App for App {
                             if ui
                                 .add(
                                     egui::Button::new(if *running {
-                                        icons::ICON_PAUSE.to_string() + "  Pause"
+                                        icon!(icons::ICON_PAUSE, "Pause")
                                     } else {
-                                        icons::ICON_PLAY_ARROW.to_string() + "  Play"
+                                        icon!(icons::ICON_PLAY_ARROW, "Play")
                                     })
                                     .shortcut_text(icons::ICON_SPACE_BAR),
                                 )
@@ -717,7 +723,7 @@ impl eframe::App for App {
                         });
                         if ui
                             .add(
-                                egui::Button::new(icons::ICON_REPLAY.to_string() + "  Reset")
+                                egui::Button::new(icon!(icons::ICON_REPLAY, "Reset"))
                                     .shortcut_text("R"),
                             )
                             .clicked()
@@ -743,8 +749,8 @@ impl eframe::App for App {
                         if ui
                             .add_enabled(
                                 !undos.is_empty(),
-                                egui::Button::new(icons::ICON_UNDO.to_string() + "  Undo")
-                                    .shortcut_text(CTRL.to_string() + "Z"),
+                                egui::Button::new(icon!(icons::ICON_UNDO, "Undo"))
+                                    .shortcut_text(concatcp!(CTRL, "Z")),
                             )
                             .clicked()
                         {
@@ -753,8 +759,8 @@ impl eframe::App for App {
                         if ui
                             .add_enabled(
                                 !redos.is_empty(),
-                                egui::Button::new(icons::ICON_REDO.to_string() + "  Redo")
-                                    .shortcut_text(CTRL.to_string() + "Y"),
+                                egui::Button::new(icon!(icons::ICON_REDO, "Redo"))
+                                    .shortcut_text(concatcp!(CTRL, "Y")),
                             )
                             .clicked()
                         {
