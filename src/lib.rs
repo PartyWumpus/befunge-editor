@@ -1,6 +1,6 @@
 #![warn(clippy::all)]
 
 mod app;
-mod befunge;
+mod befunge93;
 pub use app::App;
-pub use befunge::State as BefungeState;
+pub use befunge93::State as BefungeState;

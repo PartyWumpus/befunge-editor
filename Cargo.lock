@@ -1088,8 +1088,7 @@ dependencies = [
 [[package]]
 name = "egui_material_icons"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff7d3715b5ee29fe75afd19420756b3e0a970149b62712af1b3204a68e2012b"
+source = "git+https://github.com/PartyWumpus/hello_egui?branch=egui-icons-remove-y-offset#9c1a4b5e7b4c0878e77e509cbd5687e4e2b9c5af"
 dependencies = [
  "egui",
 ]

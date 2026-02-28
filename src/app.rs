@@ -7,6 +7,7 @@ use egui::{
     FontId, Id, Label, LayerId, Mesh, Modal, Response, RichText, ScrollArea, Shape, StrokeKind,
     TextStyle,
 };
+use egui_material_icons::icons;
 use include_dir::{Dir, include_dir};
 use std::future::Future;
 use std::ops::Range;
@@ -14,12 +15,17 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
-use crate::befunge::{Direction, Event, FungeSpace, StepStatus, get_color_of_bf_op};
-use crate::{BefungeState, befunge};
+use crate::befunge93::{Direction, Event, FungeSpace, StepStatus, get_color_of_bf_op};
+use crate::{BefungeState, befunge93};
 
 static PRESETS: Dir = include_dir!("./bf_programs");
 static CURSOR_COLOR: Color32 = Color32::from_rgb(110, 200, 255);
 static PROFILE_EACH_CHAR: bool = false;
+static CTRL: &str = if cfg!(target_os = "macos") {
+    icons::ICON_KEYBOARD_COMMAND_KEY
+} else {
+    "Ctrl + "
+};
 
 #[derive(Default, Clone, Copy)]
 pub struct CursorState {
@@ -37,9 +43,14 @@ impl CursorState {
     }
 }
 
+type UndoList = Vec<(Box<[((i64, i64), i64)]>, bool)>;
+type RedoList = Vec<Box<[((i64, i64), i64)]>>;
+
 #[derive(Clone)]
 enum Mode {
     Editing {
+        undos: UndoList,
+        redos: RedoList,
         cursor_state: CursorState,
         fungespace: FungeSpace,
     },
@@ -51,7 +62,7 @@ enum Mode {
         running: bool,
         follow: bool,
         speed: u8,
-        error_state: Option<befunge::Error>,
+        error_state: Option<befunge93::Error>,
     },
 }
 
@@ -322,6 +333,8 @@ impl Mode {
             Mode::Playing {
                 snapshot, bf_state, ..
             } => Mode::Editing {
+                undos: Vec::new(),
+                redos: Vec::new(),
                 cursor_state: CursorState::new(bf_state.position),
                 fungespace: snapshot,
             },
@@ -331,7 +344,7 @@ impl Mode {
     fn step_befunge_inner(
         bf_state: &mut BefungeState,
         running: &mut bool,
-        error_state: &mut Option<befunge::Error>,
+        error_state: &mut Option<befunge93::Error>,
         settings: &Settings,
     ) -> bool {
         let step_state = bf_state.step(settings);
@@ -454,6 +467,28 @@ impl Mode {
             }
         }
     }
+
+    fn undo(fungespace: &mut FungeSpace, undos: &mut UndoList, redos: &mut RedoList) {
+        if let Some((undos, _is_dedupable)) = undos.pop() {
+            let mut ops = vec![];
+            for (pos, val) in undos {
+                ops.push((pos, fungespace.get_wrapped(pos)));
+                fungespace.set(pos, val);
+            }
+            redos.push(ops.into());
+        };
+    }
+
+    fn redo(fungespace: &mut FungeSpace, undos: &mut UndoList, redos: &mut RedoList) {
+        if let Some(redos) = redos.pop() {
+            let mut ops = vec![];
+            for (pos, val) in redos {
+                ops.push((pos, fungespace.get_wrapped(pos)));
+                fungespace.set(pos, val);
+            }
+            undos.push((ops.into(), false));
+        };
+    }
 }
 
 impl App {
@@ -485,8 +520,10 @@ impl App {
             popup_pos: None,
             open_modal: None,
             mode: Mode::Editing {
+                undos: Vec::new(),
+                redos: Vec::new(),
                 cursor_state: CursorState::default(),
-                fungespace: FungeSpace::new(true),
+                fungespace: FungeSpace::new(),
             },
             texture: cc.egui_ctx.load_texture(
                 "noise",
@@ -537,8 +574,10 @@ impl eframe::App for App {
             self.filename = Some(filename);
             if let Some(text) = text {
                 self.mode = Mode::Editing {
+                    undos: Vec::new(),
+                    redos: Vec::new(),
                     cursor_state: CursorState::default(),
-                    fungespace: FungeSpace::new_from_string(&text, true),
+                    fungespace: FungeSpace::new_from_string(&text),
                 }
             }
         }
@@ -649,13 +688,8 @@ impl eframe::App for App {
                             }
                             if ui
                                 .add(
-                                    egui::Button::new(
-                                        egui_material_icons::icons::ICON_STEP.to_string()
-                                            + "  Step",
-                                    )
-                                    .shortcut_text(
-                                        egui_material_icons::icons::ICON_ARROW_RIGHT_ALT,
-                                    ),
+                                    egui::Button::new(icons::ICON_STEP.to_string() + "  Step")
+                                        .shortcut_text(icons::ICON_ARROW_RIGHT_ALT),
                                 )
                                 .clicked()
                             {
@@ -670,13 +704,11 @@ impl eframe::App for App {
                             if ui
                                 .add(
                                     egui::Button::new(if *running {
-                                        egui_material_icons::icons::ICON_PAUSE.to_string()
-                                            + "  Pause"
+                                        icons::ICON_PAUSE.to_string() + "  Pause"
                                     } else {
-                                        egui_material_icons::icons::ICON_PLAY_ARROW.to_string()
-                                            + "  Play"
+                                        icons::ICON_PLAY_ARROW.to_string() + "  Play"
                                     })
-                                    .shortcut_text(egui_material_icons::icons::ICON_SPACE_BAR),
+                                    .shortcut_text(icons::ICON_SPACE_BAR),
                                 )
                                 .clicked()
                             {
@@ -685,10 +717,8 @@ impl eframe::App for App {
                         });
                         if ui
                             .add(
-                                egui::Button::new(
-                                    egui_material_icons::icons::ICON_REPLAY.to_string() + "  Reset",
-                                )
-                                .shortcut_text("R"),
+                                egui::Button::new(icons::ICON_REPLAY.to_string() + "  Reset")
+                                    .shortcut_text("R"),
                             )
                             .clicked()
                         {
@@ -704,7 +734,33 @@ impl eframe::App for App {
 
                         ui.add(egui::Slider::new(speed, 1..=20).text("speed"));
                     }
-                    Mode::Editing { cursor_state, .. } => {
+                    Mode::Editing {
+                        cursor_state,
+                        undos,
+                        redos,
+                        fungespace,
+                    } => {
+                        if ui
+                            .add_enabled(
+                                !undos.is_empty(),
+                                egui::Button::new(icons::ICON_UNDO.to_string() + "  Undo")
+                                    .shortcut_text(CTRL.to_string() + "Z"),
+                            )
+                            .clicked()
+                        {
+                            Mode::undo(fungespace, undos, redos);
+                        };
+                        if ui
+                            .add_enabled(
+                                !redos.is_empty(),
+                                egui::Button::new(icons::ICON_REDO.to_string() + "  Redo")
+                                    .shortcut_text(CTRL.to_string() + "Y"),
+                            )
+                            .clicked()
+                        {
+                            Mode::redo(fungespace, undos, redos);
+                        };
+                        ui.separator();
                         ui.label("Cursor direction:");
                         ui.label(match cursor_state.direction {
                             Direction::North => "⬆",
@@ -787,6 +843,8 @@ impl App {
                 Mode::Editing {
                     cursor_state,
                     fungespace,
+                    undos,
+                    redos,
                 } => {
                     if let Some(direction) = if e.key_pressed(egui::Key::ArrowDown) {
                         Some(Direction::South)
@@ -807,12 +865,17 @@ impl App {
                         cursor_state.step_cursor_back();
                     }
 
-                    /*
-                    if e.modifiers.command && e.key_pressed(egui::Key::Z) {
-                        fungespace.undo();
+                    if (e.modifiers.shift && e.modifiers.command && e.key_pressed(egui::Key::Z))
+                        || (e.modifiers.command && e.key_pressed(egui::Key::Y))
+                    {
+                        Mode::redo(fungespace, undos, redos);
                         return;
                     }
-                    */
+
+                    if e.modifiers.command && e.key_pressed(egui::Key::Z) {
+                        Mode::undo(fungespace, undos, redos);
+                        return;
+                    }
 
                     for event in e.filtered_events(&egui::EventFilter {
                         tab: true,
@@ -822,7 +885,12 @@ impl App {
                     }) {
                         match event {
                             egui::Event::Text(text) => {
+                                let mut ops = vec![];
                                 for char in text.chars() {
+                                    ops.push((
+                                        cursor_state.location,
+                                        fungespace.get_wrapped(cursor_state.location),
+                                    ));
                                     fungespace.set(cursor_state.location, char as i64);
 
                                     if char == '"' {
@@ -841,18 +909,25 @@ impl App {
 
                                     cursor_state.step();
                                 }
+
+                                undos.push((ops.into(), false));
+                                redos.clear();
                             }
                             egui::Event::Paste(text) => {
                                 let (mut x, mut y) = cursor_state.location;
+                                let mut ops = vec![];
                                 for char in text.chars() {
                                     if char == '\n' {
                                         y += 1;
                                         x = cursor_state.location.0;
                                         continue;
                                     };
+                                    ops.push(((x, y), fungespace.get_wrapped((x, y))));
                                     fungespace.set((x, y), char as i64);
                                     x += 1
                                 }
+                                undos.push((ops.into(), false));
+                                redos.clear();
                             }
                             _ => (),
                         }
@@ -1370,7 +1445,11 @@ impl App {
                         ui.label(format!("Pos: {}, {}", popup_pos.0, popup_pos.1));
                         match &mut self.mode {
                             Mode::Playing { bf_state, .. } => {
-                                Self::dual_char_and_numeric_input(ui, &mut bf_state.map, popup_pos);
+                                Self::dual_char_and_numeric_input(
+                                    ui,
+                                    bf_state.map.get_wrapped(popup_pos),
+                                    |val| bf_state.map.set(popup_pos, val),
+                                );
 
                                 let mut breakpoint = bf_state.breakpoints.contains(&popup_pos);
                                 // FIXME: don't do hotkey if char/numeric input is selected
@@ -1393,8 +1472,29 @@ impl App {
                                     }
                                 };
                             }
-                            Mode::Editing { fungespace, .. } => {
-                                Self::dual_char_and_numeric_input(ui, fungespace, popup_pos);
+                            Mode::Editing {
+                                fungespace,
+                                undos,
+                                redos,
+                                ..
+                            } => {
+                                let chr = fungespace.get_wrapped(popup_pos);
+                                Self::dual_char_and_numeric_input(
+                                    ui,
+                                    chr,
+                                    |val| {
+                                        // if previous undo was just setting this exact value,
+                                        // don't update the undolist
+                                        if !matches!(undos.last(), Some((prev, true)) if prev.len() == 1 && prev[0].0 == popup_pos) {
+                                            undos.push((
+                                                vec![(popup_pos, chr)].into(),
+                                                true,
+                                            ));
+                                        }
+                                        redos.clear();
+                                        fungespace.set(popup_pos, val)
+                                    },
+                                );
                             }
                         };
                     });
@@ -1449,8 +1549,10 @@ impl App {
                 if ui.button("📄 New").clicked() {
                     self.filename = None;
                     self.mode = Mode::Editing {
+                        undos: Vec::new(),
+                        redos: Vec::new(),
                         cursor_state: CursorState::default(),
-                        fungespace: FungeSpace::new(true),
+                        fungespace: FungeSpace::new(),
                     }
                 }
                 if ui.button("📂 Open").clicked() {
@@ -1509,10 +1611,11 @@ impl App {
                                     .to_string(),
                             );
                             self.mode = Mode::Editing {
+                                undos: Vec::new(),
+                                redos: Vec::new(),
                                 cursor_state: CursorState::default(),
                                 fungespace: FungeSpace::new_from_string(
                                     file.contents_utf8().unwrap(),
-                                    true,
                                 ),
                             }
                         }
@@ -1915,13 +2018,9 @@ impl App {
         };
     }
 
-    fn dual_char_and_numeric_input(
-        ui: &mut egui::Ui,
-        fungespace: &mut FungeSpace,
-        pos: (i64, i64),
-    ) {
+    fn dual_char_and_numeric_input(ui: &mut egui::Ui, chr: i64, setter: impl FnOnce(i64)) {
+        let mut value = None;
         // TODO: clean this up & make the text input box a lil wider
-        let chr = fungespace.get_wrapped(pos);
         ui.horizontal(|ui| {
             let str = if let Ok(chr) = chr.try_into() {
                 match chr {
@@ -1934,7 +2033,7 @@ impl App {
                     12 => r"\f".to_string(),
                     13 => r"\r".to_string(),
                     14..b' ' | 127.. => "❎".to_string(),
-                    b' ' => egui_material_icons::icons::ICON_SPACE_BAR.to_string(),
+                    b' ' => icons::ICON_SPACE_BAR.to_string(),
                     other => String::from(other as char),
                 }
             } else {
@@ -1953,7 +2052,7 @@ impl App {
             if output.has_focus() {
                 ui.input(|e| {
                     if e.key_pressed(egui::Key::Backspace) {
-                        fungespace.set(pos, b' ' as i64);
+                        value = Some(b' ' as i64);
                     }
 
                     for event in e.filtered_events(&egui::EventFilter {
@@ -1965,7 +2064,7 @@ impl App {
                         match event {
                             egui::Event::Text(text) | egui::Event::Paste(text) => {
                                 if let Some(chr) = text.chars().last() {
-                                    fungespace.set(pos, chr as i64);
+                                    value = Some(chr as i64);
                                 }
                             }
                             _ => (),
@@ -2000,9 +2099,12 @@ impl App {
 
             let mut chr = chr;
             if ui.add(egui::DragValue::new(&mut chr).speed(1.0)).changed() {
-                fungespace.set(pos, chr);
+                value = Some(chr);
             };
         });
+        if let Some(val) = value {
+            setter(val);
+        };
     }
 }
 

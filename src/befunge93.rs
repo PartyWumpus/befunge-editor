@@ -110,7 +110,6 @@ pub struct FungeSpace {
     map: HashMap<(i64, i64), i64>,
     zero_page: Box<[i64; 100]>,
     pub max_size: (i64, i64),
-    undos: Option<VecDeque<((i64, i64), i64)>>,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -172,20 +171,15 @@ pub struct State {
 }
 
 impl FungeSpace {
-    pub fn new(undo_enabled: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             map: HashMap::default(),
             zero_page: Box::new([b' '.into(); 100]),
             max_size: (11, 11),
-            undos: if undo_enabled {
-                Some(VecDeque::new())
-            } else {
-                None
-            },
         }
     }
-    pub fn new_from_string(input: &str, undo_enabled: bool) -> Self {
-        let mut map = FungeSpace::new(undo_enabled);
+    pub fn new_from_string(input: &str) -> Self {
+        let mut map = FungeSpace::new();
         for (y, line) in input.lines().enumerate() {
             for (x, char) in line.chars().enumerate() {
                 map.set((x.try_into().unwrap(), y.try_into().unwrap()), char as i64);
@@ -198,13 +192,6 @@ impl FungeSpace {
         if pos.0 < 0 || pos.1 < 0 {
             return;
         };
-
-        if self.undos.is_some() {
-            let old = self.get_wrapped(pos);
-            let undos = self.undos.as_mut().unwrap();
-            undos.push_back((pos, old));
-            undos.truncate(254);
-        }
 
         self.set_inner(pos, val);
     }
@@ -249,15 +236,6 @@ impl FungeSpace {
         } else {
             *self.map.get(&pos).unwrap_or(&(b' ' as i64))
         }
-    }
-
-    pub fn undo(&mut self) -> Option<()> {
-        let Some(undos) = &mut self.undos else {
-            return None;
-        };
-        let (pos, val) = undos.pop_back()?;
-        self.set_inner(pos, val);
-        Some(())
     }
 
     pub fn entries(&mut self) -> impl Iterator<Item = ((i64, i64), i64)> {
@@ -328,7 +306,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             instruction_count: 0,
-            map: FungeSpace::new(false),
+            map: FungeSpace::new(),
             string_mode: false,
             position: (0, 0),
             direction: Direction::East,
