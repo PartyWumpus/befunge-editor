@@ -1,13 +1,12 @@
 use coarsetime::{Duration, Instant};
-use const_format::concatcp;
 use egui::ahash::HashMap;
 use egui::containers::menu::SubMenuButton;
 use egui::emath::TSTransform;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::style::ScrollStyle;
 use egui::{
-    FontId, Id, Label, LayerId, Mesh, Modal, Response, RichText, ScrollArea, Shape, StrokeKind,
-    TextStyle,
+    FontId, Id, Key, KeyboardShortcut, Label, LayerId, Mesh, Modal, ModifierNames, Modifiers,
+    Response, RichText, ScrollArea, Shape, StrokeKind, TextStyle,
 };
 use egui_material_icons::icons;
 use include_dir::{Dir, include_dir};
@@ -26,16 +25,38 @@ use crate::{befunge93, befunge93mini};
 static PRESETS: Dir = include_dir!("./bf_programs");
 static CURSOR_COLOR: Color32 = Color32::from_rgb(110, 200, 255);
 static PROFILE_EACH_CHAR: bool = false;
-static CTRL: &str = if cfg!(target_os = "macos") {
-    icons::ICON_KEYBOARD_COMMAND_KEY
-} else {
-    "Ctrl + "
-};
 macro_rules! icon {
     ($icon:expr, $text:expr) => {
         const_format::concatcp!($icon, "\u{2009}", $text)
     };
 }
+
+const SHORTCUT_SWAP_MODE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
+
+const SHORTCUT_UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+const SHORTCUT_REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+const SHORTCUT_REDO_ALT: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
+
+const SYMBOLS: ModifierNames = ModifierNames {
+    is_short: true,
+    alt: icons::ICON_KEYBOARD_OPTION_KEY,
+    ctrl: icons::ICON_KEYBOARD_CONTROL_KEY,
+    shift: icons::ICON_SHIFT,
+    mac_cmd: icons::ICON_KEYBOARD_COMMAND_KEY,
+    mac_alt: icons::ICON_KEYBOARD_OPTION_KEY,
+    concat: "",
+};
+
+const NAMES: ModifierNames = ModifierNames {
+    is_short: false,
+    alt: "Alt",
+    ctrl: "Ctrl",
+    shift: "Shift",
+    mac_cmd: "Cmd",
+    mac_alt: "Option",
+    concat: "+",
+};
 
 #[derive(Default, Clone, Copy)]
 pub struct CursorState {
@@ -120,9 +141,10 @@ enum Mode {
         redos: RedoList,
         cursor_state: CursorState,
         fungespace: FungeSpace,
+        stdin: String,
     },
     Playing {
-        snapshot: FungeSpace,
+        snapshot: (FungeSpace, String),
         time_since_step: Instant,
         time_since_avg: Instant,
         bf_state: Box<BefungeVersion>,
@@ -148,6 +170,7 @@ pub struct Settings {
     pub put_history: (bool, [u8; 3]),
     pub skip_spaces: bool,
     pub render_unicode: bool,
+    pub display_debug_info: bool,
     pub run_until_breakpoint: bool,
     pub invalid_operation_behaviour: InvalidOperationBehaviour,
     pub befunge_version: BefungeVersionDiscriminants,
@@ -160,6 +183,7 @@ impl Default for Settings {
             get_history: (false, [255, 0, 0]),
             put_history: (true, [0, 255, 0]),
             skip_spaces: false,
+            display_debug_info: false,
             run_until_breakpoint: false,
             render_unicode: true,
             invalid_operation_behaviour: InvalidOperationBehaviour::Halt,
@@ -411,8 +435,10 @@ impl CursorState {
 impl Mode {
     fn swap_mode(&mut self, settings: &Settings) {
         *self = match self.clone() {
-            Mode::Editing { fungespace, .. } => {
-                let bf_state = match settings.befunge_version {
+            Mode::Editing {
+                fungespace, stdin, ..
+            } => {
+                let mut bf_state = match settings.befunge_version {
                     BefungeVersionDiscriminants::Befunge93 => Box::new(BefungeVersion::Befunge93(
                         befunge93::State::new_from_fungespace(fungespace.clone()),
                     )),
@@ -422,8 +448,11 @@ impl Mode {
                         ))
                     }
                 };
+
+                *bf_state.stdin() = stdin.clone();
+
                 Mode::Playing {
-                    snapshot: fungespace.clone(),
+                    snapshot: (fungespace.clone(), stdin.clone()),
                     instruction_since: 0,
                     time_since_step: Instant::now(),
                     time_since_avg: Instant::now(),
@@ -440,7 +469,8 @@ impl Mode {
                 undos: Vec::new(),
                 redos: Vec::new(),
                 cursor_state: CursorState::new(bf_state.cursor_position()),
-                fungespace: snapshot,
+                fungespace: snapshot.0,
+                stdin: snapshot.1,
             },
         };
     }
@@ -651,6 +681,7 @@ impl App {
                 redos: Vec::new(),
                 cursor_state: CursorState::default(),
                 fungespace: FungeSpace::default(),
+                stdin: String::new(),
             },
             texture: cc.egui_ctx.load_texture(
                 "noise",
@@ -679,6 +710,12 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         puffin::profile_function!();
 
+        macro_rules! shortcut {
+            ($icon:expr) => {
+                $icon.format(&SYMBOLS, ctx.os().is_mac())
+            };
+        }
+
         if !cfg!(target_arch = "wasm32") {
             puffin::GlobalProfiler::lock().new_frame();
             puffin_egui::show_viewport_if_enabled(ctx);
@@ -705,6 +742,7 @@ impl eframe::App for App {
                     redos: Vec::new(),
                     cursor_state: CursorState::default(),
                     fungespace: FungeSpace::new_from_string(&text),
+                    stdin: String::new(),
                 }
             }
         }
@@ -799,18 +837,18 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             puffin::profile_scope!("central panel");
 
-            ui.horizontal(|ui| {
-                puffin::profile_scope!("control bar");
-                match &mut self.mode {
-                    Mode::Playing {
-                        bf_state,
-                        running,
-                        follow,
-                        speed,
-                        error_state,
-                        snapshot,
-                        ..
-                    } => {
+            puffin::profile_scope!("control bar");
+            match &mut self.mode {
+                Mode::Playing {
+                    bf_state,
+                    running,
+                    follow,
+                    speed,
+                    error_state,
+                    snapshot,
+                    ..
+                } => {
+                    ui.horizontal(|ui| {
                         ui.scope(|ui| {
                             if error_state.is_some() {
                                 ui.disable();
@@ -858,43 +896,76 @@ impl eframe::App for App {
                             **bf_state = match self.settings.befunge_version {
                                 BefungeVersionDiscriminants::Befunge93 => {
                                     BefungeVersion::Befunge93(
-                                        befunge93::State::new_from_fungespace(snapshot.clone()),
+                                        befunge93::State::new_from_fungespace(snapshot.0.clone()),
                                     )
                                 }
                                 BefungeVersionDiscriminants::Befunge93Mini => {
                                     BefungeVersion::Befunge93Mini(
-                                        befunge93mini::State::new_from_fungespace(snapshot.clone()),
+                                        befunge93mini::State::new_from_fungespace(
+                                            snapshot.0.clone(),
+                                        ),
                                     )
                                 }
                             };
                             *bf_state.breakpoints() = breakpoints;
+                            *bf_state.stdin() = snapshot.1.clone();
                         };
 
                         checkbox_with_underline(ui, follow, "Follow");
 
                         ui.add(egui::Slider::new(speed, 1..=20).text("speed"));
+                    });
+
+                    if self.settings.display_debug_info {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label("execution state");
+                                ui.label(format!("{:?}", error_state));
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("step");
+                                ui.label(bf_state.instruction_count().to_string());
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("location");
+                                ui.label(format!("{:?}", bf_state.cursor_position()));
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("direction");
+                                ui.label(format!("{:?}", bf_state.cursor_direction()));
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("string mode");
+                                ui.label(format!("{:?}", bf_state.string_mode()));
+                            });
+                        });
                     }
-                    Mode::Editing {
-                        cursor_state,
-                        undos,
-                        redos,
-                        fungespace,
-                    } => {
+                }
+                Mode::Editing {
+                    cursor_state,
+                    undos,
+                    redos,
+                    fungespace,
+                    ..
+                } => {
+                    ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
                                 !undos.is_empty(),
                                 egui::Button::new(icon!(icons::ICON_UNDO, "Undo"))
-                                    .shortcut_text(concatcp!(CTRL, "Z")),
+                                    .shortcut_text(shortcut!(SHORTCUT_UNDO)),
                             )
                             .clicked()
                         {
                             Mode::undo(fungespace, undos, redos);
                         };
+
                         if ui
                             .add_enabled(
                                 !redos.is_empty(),
                                 egui::Button::new(icon!(icons::ICON_REDO, "Redo"))
-                                    .shortcut_text(concatcp!(CTRL, "Y")),
+                                    .shortcut_text(shortcut!(SHORTCUT_REDO)),
                             )
                             .clicked()
                         {
@@ -915,9 +986,9 @@ impl eframe::App for App {
                         } else {
                             "Normal"
                         });
-                    }
+                    });
                 }
-            });
+            }
 
             ui.add_space(3.0);
 
@@ -938,10 +1009,11 @@ impl eframe::App for App {
 impl App {
     fn befunge_input(&mut self, ui: &mut egui::Ui) {
         puffin::profile_function!();
-        ui.input(|e| {
-            if e.modifiers.command && e.key_pressed(egui::Key::Enter) {
+        ui.input_mut(|e| {
+            if e.consume_shortcut(&SHORTCUT_SWAP_MODE) {
                 self.mode.swap_mode(&self.settings);
             }
+
             match &mut self.mode {
                 Mode::Playing {
                     bf_state,
@@ -951,34 +1023,35 @@ impl App {
                     follow,
                     ..
                 } => {
-                    if e.key_pressed(egui::Key::R) {
+                    if e.consume_key(Modifiers::NONE, egui::Key::R) {
                         *running = false;
                         *error_state = None;
                         // teeny bit wasteful
                         let breakpoints = bf_state.breakpoints().clone();
                         **bf_state = match self.settings.befunge_version {
                             BefungeVersionDiscriminants::Befunge93 => BefungeVersion::Befunge93(
-                                befunge93::State::new_from_fungespace(snapshot.clone()),
+                                befunge93::State::new_from_fungespace(snapshot.0.clone()),
                             ),
                             BefungeVersionDiscriminants::Befunge93Mini => {
                                 BefungeVersion::Befunge93Mini(
-                                    befunge93mini::State::new_from_fungespace(snapshot.clone()),
+                                    befunge93mini::State::new_from_fungespace(snapshot.0.clone()),
                                 )
                             }
                         };
                         *bf_state.breakpoints() = breakpoints;
+                        *bf_state.stdin() = snapshot.1.clone();
                     }
 
-                    if e.key_pressed(egui::Key::F) {
+                    if e.consume_key(Modifiers::NONE, egui::Key::F) {
                         *follow = !(*follow);
                     }
 
                     if error_state.is_none() {
-                        if e.key_pressed(egui::Key::Space) {
+                        if e.consume_key(Modifiers::NONE, egui::Key::Space) {
                             *running = !(*running);
                         }
 
-                        if e.key_pressed(egui::Key::ArrowRight) {
+                        if e.consume_key(Modifiers::NONE, egui::Key::ArrowRight) {
                             *running = false;
                             Mode::step_befunge_inner(
                                 bf_state,
@@ -994,14 +1067,16 @@ impl App {
                     fungespace,
                     undos,
                     redos,
+                    ..
                 } => {
-                    if let Some(direction) = if e.key_pressed(egui::Key::ArrowDown) {
+                    if let Some(direction) = if e.consume_key(Modifiers::NONE, egui::Key::ArrowDown)
+                    {
                         Some(Direction::South)
-                    } else if e.key_pressed(egui::Key::ArrowUp) {
+                    } else if e.consume_key(Modifiers::NONE, egui::Key::ArrowUp) {
                         Some(Direction::North)
-                    } else if e.key_pressed(egui::Key::ArrowLeft) {
+                    } else if e.consume_key(Modifiers::NONE, egui::Key::ArrowLeft) {
                         Some(Direction::West)
-                    } else if e.key_pressed(egui::Key::ArrowRight) {
+                    } else if e.consume_key(Modifiers::NONE, egui::Key::ArrowRight) {
                         Some(Direction::East)
                     } else {
                         None
@@ -1010,20 +1085,17 @@ impl App {
                         cursor_state.step(&self.settings);
                     };
 
-                    if e.key_pressed(egui::Key::Backspace) {
+                    if e.consume_key(Modifiers::NONE, egui::Key::Backspace) {
                         cursor_state.step_cursor_back(&self.settings);
                     }
 
-                    if (e.modifiers.shift && e.modifiers.command && e.key_pressed(egui::Key::Z))
-                        || (e.modifiers.command && e.key_pressed(egui::Key::Y))
+                    if e.consume_shortcut(&SHORTCUT_REDO) || e.consume_shortcut(&SHORTCUT_REDO_ALT)
                     {
                         Mode::redo(fungespace, undos, redos);
-                        return;
                     }
 
-                    if e.modifiers.command && e.key_pressed(egui::Key::Z) {
+                    if e.consume_shortcut(&SHORTCUT_UNDO) {
                         Mode::undo(fungespace, undos, redos);
-                        return;
                     }
 
                     for event in e.filtered_events(&egui::EventFilter {
@@ -1592,16 +1664,18 @@ impl App {
                                 );
 
                                 let mut breakpoint = bf_state.breakpoints().contains(&popup_pos);
-                                // FIXME: don't do hotkey if char/numeric input is selected
-                                ui.input(|e| {
-                                    if e.key_pressed(egui::Key::B) {
-                                        if breakpoint {
-                                            bf_state.breakpoints().remove(&popup_pos);
-                                        } else {
-                                            bf_state.breakpoints().insert(popup_pos);
+
+                                if ui.memory(|mem| mem.focused().is_none()) {
+                                    ui.input_mut(|e| {
+                                        if e.consume_key(Modifiers::NONE, egui::Key::B) {
+                                            if breakpoint {
+                                                bf_state.breakpoints().remove(&popup_pos);
+                                            } else {
+                                                bf_state.breakpoints().insert(popup_pos);
+                                            }
                                         }
-                                    }
-                                });
+                                    });
+                                }
                                 if checkbox_with_underline(ui, &mut breakpoint, "Breakpoint")
                                     .clicked()
                                 {
@@ -1695,6 +1769,7 @@ impl App {
                         redos: Vec::new(),
                         cursor_state: CursorState::default(),
                         fungespace: FungeSpace::default(),
+                        stdin: String::new(),
                     }
                 }
                 if ui.button("📂 Open").clicked() {
@@ -1759,6 +1834,7 @@ impl App {
                                 fungespace: FungeSpace::new_from_string(
                                     file.contents_utf8().unwrap(),
                                 ),
+                                stdin: String::new(),
                             }
                         }
                     }
@@ -1861,6 +1937,8 @@ impl App {
                     ui.checkbox(&mut profile, "Enable UI profiling");
                     puffin::set_scopes_on(profile);
                 }
+
+                ui.checkbox(&mut self.settings.display_debug_info, "Display debug info");
 
                 if ui.button("Set viewport position").clicked() {
                     self.open_modal = Some(ModalState::SetPosition(0, 0));
@@ -2038,7 +2116,7 @@ impl App {
                     });
                 });
             }
-            Mode::Editing { .. } => {
+            Mode::Editing { stdin, .. } => {
                 ui.label("Version:");
                 let version = self.settings.befunge_version;
                 if ui
@@ -2059,6 +2137,13 @@ impl App {
                 {
                     self.settings.befunge_version = BefungeVersionDiscriminants::Befunge93Mini
                 };
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_space(2.0);
+
+                    ui.text_edit_multiline(stdin);
+                    ui.label("Input:");
+                });
             }
         }
     }
@@ -2213,8 +2298,8 @@ impl App {
             }
 
             if output.has_focus() {
-                ui.input(|e| {
-                    if e.key_pressed(egui::Key::Backspace) {
+                ui.input_mut(|e| {
+                    if e.consume_key(Modifiers::NONE, egui::Key::Backspace) {
                         value = Some(b' ' as i64);
                     }
 

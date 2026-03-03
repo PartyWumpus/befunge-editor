@@ -16,7 +16,7 @@ use crate::{app::Settings, befunge93, befunge93mini};
 pub type Position = (i64, i64);
 pub type Value = i64;
 
-#[derive(RandGen, Default, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
+#[derive(RandGen, Default, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Debug)]
 pub enum Direction {
     North,
     South,
