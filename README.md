@@ -20,13 +20,13 @@ To run: `cargo run --release`
 
 ## Features I would like to add in future:
 
-- A reload hotkey (possibly a "clever" one like befunexec that keeps the state?), although won't work on the web...
+- A reload file hotkey (possibly a "clever" one like befunexec that keeps the state?), although won't nicely work on the web
 - Watching the values of locations (like befunexec)
 - Breakpoints that pause on value change
 - Some of the preprocessor things from befunexec (break & watch, but not replace)
 - A better way to move the screen large distances. Possibly a "minimap" style thing?
 - Undo in play mode
-- A befunge98 mode?
+- A befunge98 mode
 
 
 ## Thanks

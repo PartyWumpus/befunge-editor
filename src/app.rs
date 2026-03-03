@@ -1,5 +1,6 @@
 use coarsetime::{Duration, Instant};
 use const_format::concatcp;
+use egui::ahash::HashMap;
 use egui::containers::menu::SubMenuButton;
 use egui::emath::TSTransform;
 use egui::scroll_area::ScrollBarVisibility;
@@ -16,8 +17,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, Pos2, Rect, Scene, Sense, Stroke, TextureHandle, Ui, Vec2, pos2};
 
-use crate::befunge93::{Direction, Event, FungeSpace, StepStatus, get_color_of_bf_op};
-use crate::{BefungeState, befunge93};
+use crate::befunge::{
+    Befunge, BefungeVersion, BefungeVersionDiscriminants, Direction, FungeSpaceTrait,
+    GraphicalEvent, Position, StepStatus, Value, get_color_of_bf_op,
+};
+use crate::{befunge93, befunge93mini};
 
 static PRESETS: Dir = include_dir!("./bf_programs");
 static CURSOR_COLOR: Color32 = Color32::from_rgb(110, 200, 255);
@@ -49,8 +53,65 @@ impl CursorState {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct FungeSpace {
+    pub map: HashMap<Position, Value>,
+}
 type UndoList = Vec<(Box<[((i64, i64), i64)]>, bool)>;
 type RedoList = Vec<Box<[((i64, i64), i64)]>>;
+
+impl FungeSpaceTrait for FungeSpace {
+    fn set(&mut self, pos: Position, val: Value) {
+        if pos.0 < 0 || pos.1 < 0 {
+            return;
+        };
+
+        if val == b' ' as Value {
+            self.map.remove(&pos);
+        } else {
+            self.map.insert(pos, val);
+        }
+    }
+
+    fn get(&self, pos: Position) -> Value {
+        if pos.0 < 0 || pos.1 < 0 {
+            return 0;
+        }
+        *self.map.get(&pos).unwrap_or(&(b' ' as Value))
+    }
+
+    fn program_size(&self) -> (i64, i64) {
+        let (mut width, mut height) = (10, 10);
+        for (x, y) in self.map.keys() {
+            if *y > height {
+                height = *y
+            }
+            if *x > width {
+                width = *x
+            }
+        }
+        (width + 1, height + 1)
+    }
+
+    fn entries(&self) -> impl Iterator<Item = (Position, Value)> {
+        self.map.iter().map(|(k, v)| (*k, *v))
+    }
+}
+
+impl FungeSpace {
+    pub fn new_from_string(input: &str) -> FungeSpace {
+        let mut map = FungeSpace::default();
+        for (y, line) in input.lines().enumerate() {
+            for (x, char) in line.chars().enumerate() {
+                map.map.insert(
+                    (x.try_into().unwrap(), y.try_into().unwrap()),
+                    char as Value,
+                );
+            }
+        }
+        map
+    }
+}
 
 #[derive(Clone)]
 enum Mode {
@@ -64,11 +125,12 @@ enum Mode {
         snapshot: FungeSpace,
         time_since_step: Instant,
         time_since_avg: Instant,
-        bf_state: Box<BefungeState>,
+        bf_state: Box<BefungeVersion>,
+        instruction_since: usize,
         running: bool,
         follow: bool,
         speed: u8,
-        error_state: Option<befunge93::Error>,
+        error_state: Option<&'static str>,
     },
 }
 
@@ -88,6 +150,7 @@ pub struct Settings {
     pub render_unicode: bool,
     pub run_until_breakpoint: bool,
     pub invalid_operation_behaviour: InvalidOperationBehaviour,
+    pub befunge_version: BefungeVersionDiscriminants,
 }
 
 impl Default for Settings {
@@ -100,6 +163,7 @@ impl Default for Settings {
             run_until_breakpoint: false,
             render_unicode: true,
             invalid_operation_behaviour: InvalidOperationBehaviour::Halt,
+            befunge_version: BefungeVersionDiscriminants::Befunge93Mini,
         }
     }
 }
@@ -282,7 +346,10 @@ fn poss_reverse(pos: Pos2, offset: (i64, i64)) -> (i64, i64) {
 
     let y = pos.y / 17.0;
     let y = if y.is_sign_negative() { y - 1.0 } else { y };
-    (x as i64 + offset.0, y as i64 + offset.1)
+    (
+        (x as i64).saturating_add(offset.0),
+        (y as i64).saturating_add(offset.1),
+    )
 }
 
 fn intersects(a: ((i64, i64), (i64, i64)), b: (i64, i64)) -> bool {
@@ -290,67 +357,98 @@ fn intersects(a: ((i64, i64), (i64, i64)), b: (i64, i64)) -> bool {
 }
 
 impl CursorState {
-    fn step(&mut self) {
+    fn step(&mut self, settings: &Settings) {
         let (x, y) = self.location;
         match self.direction {
-            Direction::North => self.location = (x, y - 1),
-            Direction::South => self.location = (x, y + 1),
-            Direction::East => self.location = (x + 1, y),
-            Direction::West => self.location = (x - 1, y),
+            Direction::North => self.location = (x, y.saturating_sub(1)),
+            Direction::South => self.location = (x, y.saturating_add(1)),
+            Direction::East => self.location = (x.saturating_add(1), y),
+            Direction::West => self.location = (x.saturating_sub(1), y),
         }
-        if self.location.0 < 0 {
-            self.location.0 = 0
+
+        let border_pos = settings.befunge_version.border_positions();
+        if self.location.0 < border_pos.0.0 {
+            self.location.0 = border_pos.0.0
         }
-        if self.location.1 < 0 {
-            self.location.1 = 0
+        if self.location.1 < border_pos.0.1 {
+            self.location.1 = border_pos.0.1
+        }
+
+        if self.location.0 > border_pos.1.0 {
+            self.location.0 = border_pos.1.0
+        }
+        if self.location.1 > border_pos.1.1 {
+            self.location.1 = border_pos.1.1
         }
     }
 
-    fn step_cursor_back(&mut self) {
+    fn step_cursor_back(&mut self, settings: &Settings) {
         let (x, y) = self.location;
         match self.direction {
-            Direction::North => self.location = (x, y + 1),
-            Direction::South => self.location = (x, y - 1),
-            Direction::East => self.location = (x - 1, y),
-            Direction::West => self.location = (x + 1, y),
+            Direction::North => self.location = (x, y.saturating_add(1)),
+            Direction::South => self.location = (x, y.saturating_sub(1)),
+            Direction::East => self.location = (x.saturating_sub(1), y),
+            Direction::West => self.location = (x.saturating_add(1), y),
         }
-        if self.location.0 < 0 {
-            self.location.0 = 0
+
+        let border_pos = settings.befunge_version.border_positions();
+        if self.location.0 < border_pos.0.0 {
+            self.location.0 = border_pos.0.0
         }
-        if self.location.1 < 0 {
-            self.location.1 = 0
+        if self.location.1 < border_pos.0.1 {
+            self.location.1 = border_pos.0.1
+        }
+
+        if self.location.0 > border_pos.1.0 {
+            self.location.0 = border_pos.1.0
+        }
+        if self.location.1 > border_pos.1.1 {
+            self.location.1 = border_pos.1.1
         }
     }
 }
 
 impl Mode {
-    fn swap_mode(&mut self) {
+    fn swap_mode(&mut self, settings: &Settings) {
         *self = match self.clone() {
-            Mode::Editing { fungespace, .. } => Mode::Playing {
-                snapshot: fungespace.clone(),
-                time_since_step: Instant::now(),
-                time_since_avg: Instant::now(),
-                bf_state: Box::new(BefungeState::new_from_fungespace(fungespace)),
-                running: false,
-                follow: false,
-                speed: 5,
-                error_state: None,
-            },
+            Mode::Editing { fungespace, .. } => {
+                let bf_state = match settings.befunge_version {
+                    BefungeVersionDiscriminants::Befunge93 => Box::new(BefungeVersion::Befunge93(
+                        befunge93::State::new_from_fungespace(fungespace.clone()),
+                    )),
+                    BefungeVersionDiscriminants::Befunge93Mini => {
+                        Box::new(BefungeVersion::Befunge93Mini(
+                            befunge93mini::State::new_from_fungespace(fungespace.clone()),
+                        ))
+                    }
+                };
+                Mode::Playing {
+                    snapshot: fungespace.clone(),
+                    instruction_since: 0,
+                    time_since_step: Instant::now(),
+                    time_since_avg: Instant::now(),
+                    bf_state,
+                    running: false,
+                    follow: false,
+                    speed: 5,
+                    error_state: None,
+                }
+            }
             Mode::Playing {
                 snapshot, bf_state, ..
             } => Mode::Editing {
                 undos: Vec::new(),
                 redos: Vec::new(),
-                cursor_state: CursorState::new(bf_state.position),
+                cursor_state: CursorState::new(bf_state.cursor_position()),
                 fungespace: snapshot,
             },
         };
     }
 
     fn step_befunge_inner(
-        bf_state: &mut BefungeState,
+        bf_state: &mut BefungeVersion,
         running: &mut bool,
-        error_state: &mut Option<befunge93::Error>,
+        error_state: &mut Option<&'static str>,
         settings: &Settings,
     ) -> bool {
         let step_state = bf_state.step(settings);
@@ -362,20 +460,43 @@ impl Mode {
             }
             StepStatus::Error(error) => {
                 use InvalidOperationBehaviour as IOpBehav;
-                match settings.invalid_operation_behaviour {
-                    IOpBehav::Reflect => {
-                        bf_state.direction = bf_state.direction.reverse();
-                        bf_state.step_position(settings);
-                        false
+
+                match bf_state {
+                    BefungeVersion::Befunge93(bf_state) => {
+                        match settings.invalid_operation_behaviour {
+                            IOpBehav::Reflect => {
+                                bf_state.direction = bf_state.direction.reverse();
+                                bf_state.step_position(settings);
+                                false
+                            }
+                            IOpBehav::Halt => {
+                                *error_state = Some(error);
+                                *running = false;
+                                true
+                            }
+                            IOpBehav::Ignore => {
+                                bf_state.step_position(settings);
+                                false
+                            }
+                        }
                     }
-                    IOpBehav::Halt => {
-                        *error_state = Some(error);
-                        *running = false;
-                        true
-                    }
-                    IOpBehav::Ignore => {
-                        bf_state.step_position(settings);
-                        false
+                    BefungeVersion::Befunge93Mini(bf_state) => {
+                        match settings.invalid_operation_behaviour {
+                            IOpBehav::Reflect => {
+                                bf_state.direction = bf_state.direction.reverse();
+                                bf_state.step_position(settings);
+                                false
+                            }
+                            IOpBehav::Halt => {
+                                *error_state = Some(error);
+                                *running = false;
+                                true
+                            }
+                            IOpBehav::Ignore => {
+                                bf_state.step_position(settings);
+                                false
+                            }
+                        }
                     }
                 }
             }
@@ -478,7 +599,7 @@ impl Mode {
         if let Some((undos, _is_dedupable)) = undos.pop() {
             let mut ops = vec![];
             for (pos, val) in undos {
-                ops.push((pos, fungespace.get_wrapped(pos)));
+                ops.push((pos, fungespace.get(pos)));
                 fungespace.set(pos, val);
             }
             redos.push(ops.into());
@@ -489,7 +610,7 @@ impl Mode {
         if let Some(redos) = redos.pop() {
             let mut ops = vec![];
             for (pos, val) in redos {
-                ops.push((pos, fungespace.get_wrapped(pos)));
+                ops.push((pos, fungespace.get(pos)));
                 fungespace.set(pos, val);
             }
             undos.push((ops.into(), false));
@@ -529,7 +650,7 @@ impl App {
                 undos: Vec::new(),
                 redos: Vec::new(),
                 cursor_state: CursorState::default(),
-                fungespace: FungeSpace::new(),
+                fungespace: FungeSpace::default(),
             },
             texture: cc.egui_ctx.load_texture(
                 "noise",
@@ -620,12 +741,12 @@ impl eframe::App for App {
 
                     ui.separator();
 
-                    let fungespace = match &self.mode {
-                        Mode::Playing { bf_state, .. } => &bf_state.map,
-                        Mode::Editing { fungespace, .. } => fungespace,
+                    let val = match &self.mode {
+                        Mode::Playing { bf_state, .. } => bf_state.get(self.cursor_pos),
+                        Mode::Editing { fungespace, .. } => fungespace.get(self.cursor_pos),
                     };
                     ui.add(egui::Label::new(
-                        RichText::new(format!("{:04}", fungespace.get_wrapped(self.cursor_pos)))
+                        RichText::new(format!("{:04}", val))
                             .text_style(TextStyle::Monospace),
                     ));
                     ui.label("Value: ");
@@ -633,6 +754,7 @@ impl eframe::App for App {
                     if let Mode::Playing {
                         bf_state,
                         time_since_avg,
+                        instruction_since,
                         speed,
                         ..
                     } = &mut self.mode
@@ -642,7 +764,7 @@ impl eframe::App for App {
                         let now = Instant::now();
                         let time_since = now.duration_since(*time_since_avg).as_micros();
                         let hz =
-                            (bf_state.instruction_count as f64 * 1000000.0) / time_since as f64;
+                            ((bf_state.instruction_count()-*instruction_since) as f64 * 1000000.0) / time_since as f64;
                         let hz = match hz {
                             -0.0..1_000.0 => {
                                 format!("~{:4}Hz", hz.round())
@@ -660,7 +782,7 @@ impl eframe::App for App {
                         ))
                         .on_hover_text("Estimate is only vaguely accurate, calculated per frame.\nWhen skip spaces is on, this estimate is totally wrong.");
                         ui.label("Speed: ");
-                        bf_state.instruction_count = 0;
+                        *instruction_since = bf_state.instruction_count();
                         *time_since_avg = now;
                     };
                 });
@@ -669,6 +791,7 @@ impl eframe::App for App {
 
         egui::SidePanel::left("left_panel")
             .resizable(false)
+            .exact_width(150.0)
             .show(ctx, |ui| {
                 self.info_panel(ui);
             });
@@ -731,9 +854,20 @@ impl eframe::App for App {
                             *running = false;
                             *error_state = None;
                             // teeny bit wasteful
-                            let breakpoints = bf_state.breakpoints.clone();
-                            **bf_state = BefungeState::new_from_fungespace(snapshot.clone());
-                            bf_state.breakpoints = breakpoints;
+                            let breakpoints = bf_state.breakpoints().clone();
+                            **bf_state = match self.settings.befunge_version {
+                                BefungeVersionDiscriminants::Befunge93 => {
+                                    BefungeVersion::Befunge93(
+                                        befunge93::State::new_from_fungespace(snapshot.clone()),
+                                    )
+                                }
+                                BefungeVersionDiscriminants::Befunge93Mini => {
+                                    BefungeVersion::Befunge93Mini(
+                                        befunge93mini::State::new_from_fungespace(snapshot.clone()),
+                                    )
+                                }
+                            };
+                            *bf_state.breakpoints() = breakpoints;
                         };
 
                         checkbox_with_underline(ui, follow, "Follow");
@@ -806,7 +940,7 @@ impl App {
         puffin::profile_function!();
         ui.input(|e| {
             if e.modifiers.command && e.key_pressed(egui::Key::Enter) {
-                self.mode.swap_mode();
+                self.mode.swap_mode(&self.settings);
             }
             match &mut self.mode {
                 Mode::Playing {
@@ -821,9 +955,18 @@ impl App {
                         *running = false;
                         *error_state = None;
                         // teeny bit wasteful
-                        let breakpoints = bf_state.breakpoints.clone();
-                        **bf_state = BefungeState::new_from_fungespace(snapshot.clone());
-                        bf_state.breakpoints = breakpoints;
+                        let breakpoints = bf_state.breakpoints().clone();
+                        **bf_state = match self.settings.befunge_version {
+                            BefungeVersionDiscriminants::Befunge93 => BefungeVersion::Befunge93(
+                                befunge93::State::new_from_fungespace(snapshot.clone()),
+                            ),
+                            BefungeVersionDiscriminants::Befunge93Mini => {
+                                BefungeVersion::Befunge93Mini(
+                                    befunge93mini::State::new_from_fungespace(snapshot.clone()),
+                                )
+                            }
+                        };
+                        *bf_state.breakpoints() = breakpoints;
                     }
 
                     if e.key_pressed(egui::Key::F) {
@@ -864,11 +1007,11 @@ impl App {
                         None
                     } {
                         cursor_state.direction = direction;
-                        cursor_state.step();
+                        cursor_state.step(&self.settings);
                     };
 
                     if e.key_pressed(egui::Key::Backspace) {
-                        cursor_state.step_cursor_back();
+                        cursor_state.step_cursor_back(&self.settings);
                     }
 
                     if (e.modifiers.shift && e.modifiers.command && e.key_pressed(egui::Key::Z))
@@ -895,7 +1038,7 @@ impl App {
                                 for char in text.chars() {
                                     ops.push((
                                         cursor_state.location,
-                                        fungespace.get_wrapped(cursor_state.location),
+                                        fungespace.get(cursor_state.location),
                                     ));
                                     fungespace.set(cursor_state.location, char as i64);
 
@@ -913,7 +1056,7 @@ impl App {
                                         }
                                     }
 
-                                    cursor_state.step();
+                                    cursor_state.step(&self.settings);
                                 }
 
                                 undos.push((ops.into(), false));
@@ -928,7 +1071,7 @@ impl App {
                                         x = cursor_state.location.0;
                                         continue;
                                     };
-                                    ops.push(((x, y), fungespace.get_wrapped((x, y))));
+                                    ops.push(((x, y), fungespace.get((x, y))));
                                     fungespace.set((x, y), char as i64);
                                     x += 1
                                 }
@@ -955,9 +1098,12 @@ impl App {
             ..
         } = &self.mode
         {
-            self.scene_offset = bf_state.position;
+            self.scene_offset = bf_state.cursor_position();
             self.scene_rect.set_center(poss((0.5, 0.5)));
-            // disables panning, TODO: disable scrolling
+            // disable panning
+            ui.input_mut(|input| {
+                input.smooth_scroll_delta = Vec2::ZERO;
+            });
             scene = scene.sense(Sense::HOVER);
         } else {
             if self.scene_rect.left() >= 130.0 {
@@ -993,11 +1139,16 @@ impl App {
                 // Grid dots
                 {
                     puffin::profile_scope!("grid dots");
+
+                    let border_pos = self.settings.befunge_version.border_positions();
+
+                    // TODO: remove overlap of bottom/right dots with border line
                     if clip_rect.height() < 2500.0 {
                         let mut y = f32::max(
                             (clip_rect.top() / 17.0).round() * 17.0,
                             17.0 - (self.scene_offset.1 as f32 * 17.0),
                         );
+
                         loop {
                             let mut x = f32::max(
                                 (clip_rect.left() / 13.0).round() * 13.0,
@@ -1008,7 +1159,7 @@ impl App {
                                 //painter.rect_filled(Rect::from_min_max(Pos2::new(x, y), Pos2::new(x+0.5, y+0.5)), 0.0, Color32::from_gray(90));
                                 if x > f32::min(
                                     clip_rect.right(),
-                                    (i64::MAX - i64::max(self.scene_offset.0, 0) - 1) as f32 * 13.0,
+                                    (border_pos.1.1.saturating_sub(self.scene_offset.0)) as f32 * 13.0,
                                 ) {
                                     break;
                                 };
@@ -1016,7 +1167,7 @@ impl App {
                             }
                             if y > f32::min(
                                 clip_rect.bottom(),
-                                (i64::MAX - i64::max(self.scene_offset.1, 0) - 1) as f32 * 17.0,
+                                (border_pos.1.1.saturating_sub(self.scene_offset.1)) as f32 * 17.0,
                             ) {
                                 break;
                             };
@@ -1027,26 +1178,9 @@ impl App {
 
                 // Border lines
                 {
-                    puffin::profile_scope!("border");
+                    puffin::profile_scope!("border"); 
 
-                    // cross at 0,0
-                    if false {
-                        painter.line_segment(
-                            [
-                                Pos2::new(clip_rect.left(), 0.0),
-                                Pos2::new(clip_rect.right(), 0.0),
-                            ],
-                            Stroke::new(1.0, Color32::RED),
-                        );
-
-                        painter.line_segment(
-                            [
-                                Pos2::new(0.0, clip_rect.top()),
-                                Pos2::new(0.0, clip_rect.bottom()),
-                            ],
-                            Stroke::new(1.0, Color32::RED),
-                        );
-                    }
+                    let border_pos = self.settings.befunge_version.border_positions();
 
                     // Top line
                     painter.line_segment(
@@ -1061,7 +1195,7 @@ impl App {
                             Pos2::new(
                                 f32::min(
                                     clip_rect.right(),
-                                    ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0)
+                                    ((border_pos.1.1.saturating_sub(self.scene_offset.0)) as f32 + 1.0)
                                         * 13.0,
                                 ),
                                 -0.5 - (self.scene_offset.1 as f32) * 17.0,
@@ -1078,15 +1212,15 @@ impl App {
                                     clip_rect.left(),
                                     -1.0 - (self.scene_offset.0 as f32) * 13.0,
                                 ),
-                                0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
+                                0.5 - ((self.scene_offset.1 - border_pos.1.1 - 1) as f32) * 17.0,
                             ),
                             Pos2::new(
                                 f32::min(
                                     clip_rect.right(),
-                                    ((i64::MAX - i64::max(self.scene_offset.0, 0)) as f32 + 1.0)
+                                    ((border_pos.1.1.saturating_sub(self.scene_offset.0)) as f32 + 1.0)
                                         * 13.0,
                                 ),
-                                0.5 - ((self.scene_offset.1 - i64::MAX - 1) as f32) * 17.0,
+                                0.5 - ((self.scene_offset.1 - border_pos.1.1 - 1) as f32) * 17.0,
                             ),
                         ],
                         Stroke::new(1.0, Color32::from_gray(50)),
@@ -1106,7 +1240,7 @@ impl App {
                                 -0.5 - (self.scene_offset.0 as f32) * 13.0,
                                 f32::min(
                                     clip_rect.bottom(),
-                                    ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0)
+                                    ((border_pos.1.1.saturating_sub(self.scene_offset.1)) as f32 + 1.0)
                                         * 17.0,
                                 ),
                             ),
@@ -1118,17 +1252,17 @@ impl App {
                     painter.line_segment(
                         [
                             Pos2::new(
-                                0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
+                                0.5 - ((self.scene_offset.0 - border_pos.1.1 - 1) as f32) * 13.0,
                                 f32::max(
                                     clip_rect.top(),
                                     -1.0 - (self.scene_offset.1 as f32) * 17.0,
                                 ),
                             ),
                             Pos2::new(
-                                0.5 - ((self.scene_offset.0 - i64::MAX - 1) as f32) * 13.0,
+                                0.5 - ((self.scene_offset.0 - border_pos.1.1 - 1) as f32) * 13.0,
                                 f32::min(
                                     clip_rect.bottom(),
-                                    ((i64::MAX - i64::max(self.scene_offset.1, 0)) as f32 + 1.0)
+                                    ((border_pos.1.1.saturating_sub(self.scene_offset.1)) as f32 + 1.0)
                                         * 17.0,
                                 ),
                             ),
@@ -1143,7 +1277,7 @@ impl App {
                                 Pos2::new(clip_rect.left(), 0.0),
                                 Pos2::new(clip_rect.right(), 0.0),
                             ],
-                            Stroke::new(1.0, Color32::from_gray(50)),
+                            Stroke::new(1.0, Color32::RED),
                         );
 
                         painter.line_segment(
@@ -1151,7 +1285,7 @@ impl App {
                                 Pos2::new(0.0, clip_rect.top()),
                                 Pos2::new(0.0, clip_rect.bottom()),
                             ],
-                            Stroke::new(1.0, Color32::from_gray(50)),
+                            Stroke::new(1.0, Color32::RED),
                         );
                     }
                 }
@@ -1163,26 +1297,26 @@ impl App {
                             // TODO: move this somewhere more sensible
                             let now = Instant::now();
                             bf_state
-                                .pos_history
+                                .pos_history()
                                 .retain(|_, v| v.time_since(now) < Duration::from_millis(5000));
 
                             bf_state
-                                .put_history
+                                .put_history()
                                 .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
                             bf_state
-                                .get_history
+                                .get_history()
                                 .retain(|_, v| v.elapsed() < Duration::from_millis(5000));
 
                             painter.rect(
-                                recter(bf_state.position, self.scene_offset).shrink(1.0),
+                                recter(bf_state.cursor_position(), self.scene_offset).shrink(1.0),
                                 0.0,
                                 Color32::PURPLE,
                                 Stroke::NONE,
                                 StrokeKind::Outside,
                             );
 
-                            for (pos, visited) in &bf_state.pos_history {
+                            for (pos, visited) in bf_state.pos_history() {
                                 let time = (visited.time_since(now).as_millis() as f32) / 1000.0;
 
                                 if let Some(mult) = calculate_decay(time) {
@@ -1275,7 +1409,7 @@ impl App {
                                 }
                             }
 
-                            for (pos, instant) in &bf_state.put_history {
+                            for (pos, instant) in bf_state.put_history() {
                                 let time = (instant.elapsed().as_millis() as f32) / 1000.0;
                                 if let Some(mult) = calculate_decay(time) {
                                     let rect = recter(*pos, self.scene_offset);
@@ -1291,7 +1425,7 @@ impl App {
                                 }
                             }
 
-                            for (pos, instant) in &bf_state.get_history {
+                            for (pos, instant) in bf_state.get_history() {
                                 let time = (instant.elapsed().as_millis() as f32) / 1000.0;
                                 if let Some(mult) = calculate_decay(time) {
                                     let rect = recter(*pos, self.scene_offset);
@@ -1307,7 +1441,7 @@ impl App {
                                 }
                             }
 
-                            for pos in &bf_state.breakpoints {
+                            for pos in bf_state.breakpoints().iter() {
                                 let rect = recter(*pos, self.scene_offset);
 
                                 painter.rect(
@@ -1333,7 +1467,7 @@ impl App {
                             );
 
                             let mut cursor_copy = *cursor_state;
-                            cursor_copy.step();
+                            cursor_copy.step(&self.settings);
 
                             painter.rect(
                                 recter(cursor_copy.location, self.scene_offset),
@@ -1355,11 +1489,8 @@ impl App {
                     puffin::profile_scope!("chars");
 
                     let mut mesh = egui::Mesh::with_texture(egui::TextureId::default());
-                    let map = match &mut self.mode {
-                        Mode::Playing { bf_state, .. } => &mut bf_state.map,
-                        Mode::Editing { fungespace, .. } => fungespace,
-                    };
 
+                    let border_pos = self.settings.befunge_version.border_positions();
                     let mut integer_clip_rect = (
                         poss_reverse(clip_rect.left_top(), self.scene_offset),
                         poss_reverse(clip_rect.right_bottom(), self.scene_offset),
@@ -1382,11 +1513,25 @@ impl App {
                         integer_clip_rect.0.1 = i64::MAX;
                     }
 
+                    integer_clip_rect = (
+                        (
+                            integer_clip_rect.0.0.max(border_pos.0.0),
+                            integer_clip_rect.0.1.max(border_pos.0.1)
+                        ),
+                        (
+                            integer_clip_rect.1.0.min(border_pos.1.0),
+                            integer_clip_rect.1.1.min(border_pos.1.1)
+                        ),
+                    );
+
                     for x in integer_clip_rect.0.0.max(0)..=integer_clip_rect.1.0 {
                         for y in integer_clip_rect.0.1.max(0)..=integer_clip_rect.1.1 {
                             let pos = recter((x, y), self.scene_offset);
-                            if let Some(val) = map.get((x, y))
-                                && val != b' ' as i64
+                            let val = match &mut self.mode {
+                        Mode::Playing { bf_state, .. } => bf_state.get((x, y)),
+                        Mode::Editing { fungespace, .. } => fungespace.get((x, y)),
+                    };
+                            if val != b' ' as i64
                             {
                                 App::draw_char(
                                     ui,
@@ -1399,17 +1544,6 @@ impl App {
                             }
                         }
                     }
-
-                    /*
-                    for (pos, val) in map.entries() {
-                        if !intersects(integer_clip_rect, pos) || val == ' ' as i64 {
-                            continue;
-                        }
-
-                        let pos = recter(pos, self.scene_offset);
-                        App::draw_char(ui, &self.char_renderer, &mut mesh, &self.settings, pos, val);
-                    }
-                    */
 
                     ui.painter().add(egui::Shape::Mesh(mesh.into()));
                 }
@@ -1453,18 +1587,18 @@ impl App {
                             Mode::Playing { bf_state, .. } => {
                                 Self::dual_char_and_numeric_input(
                                     ui,
-                                    bf_state.map.get_wrapped(popup_pos),
-                                    |val| bf_state.map.set(popup_pos, val),
+                                    bf_state.get(popup_pos),
+                                    |val| bf_state.set(popup_pos, val),
                                 );
 
-                                let mut breakpoint = bf_state.breakpoints.contains(&popup_pos);
+                                let mut breakpoint = bf_state.breakpoints().contains(&popup_pos);
                                 // FIXME: don't do hotkey if char/numeric input is selected
                                 ui.input(|e| {
                                     if e.key_pressed(egui::Key::B) {
                                         if breakpoint {
-                                            bf_state.breakpoints.remove(&popup_pos);
+                                            bf_state.breakpoints().remove(&popup_pos);
                                         } else {
-                                            bf_state.breakpoints.insert(popup_pos);
+                                            bf_state.breakpoints().insert(popup_pos);
                                         }
                                     }
                                 });
@@ -1472,9 +1606,9 @@ impl App {
                                     .clicked()
                                 {
                                     if breakpoint {
-                                        bf_state.breakpoints.insert(popup_pos);
+                                        bf_state.breakpoints().insert(popup_pos);
                                     } else {
-                                        bf_state.breakpoints.remove(&popup_pos);
+                                        bf_state.breakpoints().remove(&popup_pos);
                                     }
                                 };
                             }
@@ -1484,7 +1618,7 @@ impl App {
                                 redos,
                                 ..
                             } => {
-                                let chr = fungespace.get_wrapped(popup_pos);
+                                let chr = fungespace.get(popup_pos);
                                 Self::dual_char_and_numeric_input(
                                     ui,
                                     chr,
@@ -1517,9 +1651,10 @@ impl App {
         if response.contains_pointer()
             && let Some(pos) = response.hover_pos()
         {
-            let (x, y) = poss_reverse(pos, self.scene_offset);
-            if x >= 0 && y >= 0 {
-                self.cursor_pos = (x, y)
+            let pos = poss_reverse(pos, self.scene_offset);
+            let border_pos = self.settings.befunge_version.border_positions();
+            if intersects(border_pos, pos) {
+                self.cursor_pos = pos
             }
         };
 
@@ -1530,7 +1665,8 @@ impl App {
             match &mut self.mode {
                 Mode::Playing { .. } => (),
                 Mode::Editing { cursor_state, .. } => {
-                    if pos.1 >= 0 && pos.0 >= 0 {
+                    let border_pos = self.settings.befunge_version.border_positions();
+                    if intersects(border_pos, pos) {
                         cursor_state.location = pos;
                     }
                 }
@@ -1558,7 +1694,7 @@ impl App {
                         undos: Vec::new(),
                         redos: Vec::new(),
                         cursor_state: CursorState::default(),
-                        fungespace: FungeSpace::new(),
+                        fungespace: FungeSpace::default(),
                     }
                 }
                 if ui.button("📂 Open").clicked() {
@@ -1590,7 +1726,7 @@ impl App {
 
                     let task = task.save_file();
                     let contents = match &mut self.mode {
-                        Mode::Playing { bf_state, .. } => bf_state.map.serialize(),
+                        Mode::Playing { bf_state, .. } => bf_state.serialize(),
                         Mode::Editing { fungespace, .. } => fungespace.serialize(),
                     };
 
@@ -1707,16 +1843,14 @@ impl App {
             ui.menu_button("View", |ui| {
                 if ui.button("Show whole program").clicked() {
                     self.scene_offset = (0, 0);
-                    let fungespace = match &self.mode {
-                        Mode::Playing { bf_state, .. } => &bf_state.map,
-                        Mode::Editing { fungespace, .. } => fungespace,
+                    let program_size = match &self.mode {
+                        Mode::Playing { bf_state, .. } => bf_state.program_size(),
+                        Mode::Editing { fungespace, .. } => fungespace.program_size(),
                     };
+
                     self.scene_rect = Rect::from_min_max(
-                        poss((-1.0, -1.0)),
-                        poss((
-                            (fungespace.max_size.0 + 2) as f32,
-                            (fungespace.max_size.1 + 2) as f32,
-                        )),
+                        Pos2::new(-13.0, -17.0),
+                        poss(((program_size.0 + 2) as f32, (program_size.1 + 2) as f32)),
                     );
                 };
             });
@@ -1743,11 +1877,11 @@ impl App {
             };
 
             if ui.add(egui::Button::selectable(!mode, "Edit")).clicked() && mode {
-                self.mode.swap_mode();
+                self.mode.swap_mode(&self.settings);
             };
 
             if ui.add(egui::Button::selectable(mode, "Run")).clicked() && !mode {
-                self.mode.swap_mode();
+                self.mode.swap_mode(&self.settings);
             };
 
             if let Mode::Playing {
@@ -1768,141 +1902,164 @@ impl App {
 
     fn info_panel(&mut self, ui: &mut egui::Ui) {
         puffin::profile_function!();
-        if let Mode::Playing {
-            bf_state, running, ..
-        } = &mut self.mode
-        {
-            if let Some(graphics) = &mut bf_state.graphics {
-                ui.horizontal(|ui| {
-                    ui.label("Color:");
-                    let size = Vec2::splat(16.0);
-                    let (response, painter) = ui.allocate_painter(size, Sense::hover());
-                    let color = graphics.current_color;
-                    let response = response.on_hover_text(format!(
-                        "#{:02X}{:02X}{:02X}",
-                        color.r(),
-                        color.g(),
-                        color.b()
-                    ));
-                    let rect = response.rect;
-                    let c = rect.center();
-                    let r = rect.width() / 2.0 - 1.0;
-                    let color = Color32::from_gray(128);
-                    let stroke = Stroke::new(1.0, color);
-                    painter.circle(c, r, graphics.current_color, stroke);
-                });
-
-                egui::Window::new("Graphics")
-                    .min_size((1.0, 1.0))
-                    .show(ui.ctx(), |ui| {
-                        self.texture.set(
-                            egui::ColorImage::new(
-                                [graphics.size.0, graphics.size.1],
-                                graphics.texture.clone(),
-                            ),
-                            egui::TextureOptions::NEAREST,
-                        );
-
-                        let ppp = ui.ctx().pixels_per_point();
-                        let tex_size = self.texture.size_vec2();
-                        let available = ui.available_size();
-
-                        let scale = ((available * ppp) / tex_size).floor().min_elem().max(1.0);
-                        let display_size = tex_size * scale / ppp;
-
-                        let (rect, canvas) =
-                            ui.allocate_exact_size(display_size, egui::Sense::click());
-
-                        let snapped_min = (rect.min * ppp).round() / ppp;
-                        let snapped_rect = egui::Rect::from_min_size(snapped_min, display_size);
-
-                        let sized_texture =
-                            egui::load::SizedTexture::new(&self.texture, display_size);
-                        ui.painter().image(
-                            sized_texture.id,
-                            snapped_rect,
-                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                        if canvas.clicked()
-                            && let Some(pos) = canvas.interact_pointer_pos()
-                        {
-                            let container = canvas.interact_rect;
-                            let pos = pos.clamp(container.min, container.max);
-                            let pos = pos2(
-                                (pos.x - container.left()) / container.width(),
-                                (pos.y - container.top()) / container.height(),
-                            );
-                            let pixel_pos = (
-                                ((graphics.size.0 - 1) as f32 * pos.x).round() as i64,
-                                ((graphics.size.1 - 1) as f32 * pos.y).round() as i64,
-                            );
-                            graphics
-                                .event_queue
-                                .push_back(Event::MouseClick(pixel_pos.0, pixel_pos.1));
-                        }
+        match &mut self.mode {
+            Mode::Playing {
+                bf_state, running, ..
+            } => {
+                if let Some(graphics) = &mut bf_state.graphics() {
+                    ui.horizontal(|ui| {
+                        ui.label("Color:");
+                        let size = Vec2::splat(16.0);
+                        let (response, painter) = ui.allocate_painter(size, Sense::hover());
+                        let color = graphics.current_color;
+                        let response = response.on_hover_text(format!(
+                            "#{:02X}{:02X}{:02X}",
+                            color.r(),
+                            color.g(),
+                            color.b()
+                        ));
+                        let rect = response.rect;
+                        let c = rect.center();
+                        let r = rect.width() / 2.0 - 1.0;
+                        let color = Color32::from_gray(128);
+                        let stroke = Stroke::new(1.0, color);
+                        painter.circle(c, r, graphics.current_color, stroke);
                     });
-            };
 
-            ui.label("Stack:");
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.add_space(2.0);
+                    egui::Window::new("Graphics")
+                        .min_size((1.0, 1.0))
+                        .show(ui.ctx(), |ui| {
+                            self.texture.set(
+                                egui::ColorImage::new(
+                                    [graphics.size.0, graphics.size.1],
+                                    graphics.texture.clone(),
+                                ),
+                                egui::TextureOptions::NEAREST,
+                            );
 
-                let resp = ui.text_edit_multiline(&mut bf_state.input_buffer);
-                if resp.changed()
-                    && let Some(val) = bf_state.map.get(bf_state.position)
-                    && (val == b'~' as i64 || val == b'&' as i64)
-                {
-                    *running = true
-                }
-                ui.label("Input:");
+                            let ppp = ui.ctx().pixels_per_point();
+                            let tex_size = self.texture.size_vec2();
+                            let available = ui.available_size();
 
-                ui.add_space(2.0);
-                ui.label(&bf_state.output);
-                ui.label("Output:");
-                ui.add_space(2.0);
+                            let scale = ((available * ppp) / tex_size).floor().min_elem().max(1.0);
+                            let display_size = tex_size * scale / ppp;
 
-                ui.vertical(|ui| {
-                    let text_style = TextStyle::Body;
+                            let (rect, canvas) =
+                                ui.allocate_exact_size(display_size, egui::Sense::click());
 
-                    ui.style_mut().spacing.scroll = ScrollStyle {
-                        floating: true,
-                        bar_width: 8.0,
-                        floating_width: 8.0,
-                        floating_allocated_width: 6.0,
-                        foreground_color: false,
+                            let snapped_min = (rect.min * ppp).round() / ppp;
+                            let snapped_rect = egui::Rect::from_min_size(snapped_min, display_size);
 
-                        dormant_background_opacity: 0.4,
-                        dormant_handle_opacity: 0.4,
-
-                        active_background_opacity: 0.6,
-                        active_handle_opacity: 0.6,
-
-                        interact_background_opacity: 0.8,
-                        interact_handle_opacity: 0.8,
-                        ..ScrollStyle::solid()
-                    };
-                    ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
-                        .show_rows(
-                            ui,
-                            ui.text_style_height(&text_style),
-                            bf_state.stack.len(),
-                            |ui, row_range| {
-                                let painter = ui.painter();
-                                painter.rect_filled(
-                                    ui.clip_rect(),
-                                    5.0,
-                                    ui.visuals().faint_bg_color,
+                            let sized_texture =
+                                egui::load::SizedTexture::new(&self.texture, display_size);
+                            ui.painter().image(
+                                sized_texture.id,
+                                snapped_rect,
+                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                            if canvas.clicked()
+                                && let Some(pos) = canvas.interact_pointer_pos()
+                            {
+                                let container = canvas.interact_rect;
+                                let pos = pos.clamp(container.min, container.max);
+                                let pos = pos2(
+                                    (pos.x - container.left()) / container.width(),
+                                    (pos.y - container.top()) / container.height(),
                                 );
-                                for value in row_range {
-                                    ui.label(bf_state.stack[value].to_string());
-                                }
-                            },
-                        );
+                                let pixel_pos = (
+                                    ((graphics.size.0 - 1) as f32 * pos.x).round() as i64,
+                                    ((graphics.size.1 - 1) as f32 * pos.y).round() as i64,
+                                );
+                                graphics
+                                    .event_queue
+                                    .push_back(GraphicalEvent::MouseClick(pixel_pos));
+                            }
+                        });
+                };
+
+                ui.label("Stack:");
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_space(2.0);
+
+                    let resp = ui.text_edit_multiline(bf_state.stdin());
+                    if resp.changed()
+                        && let val = bf_state.get(bf_state.cursor_position())
+                        && (val == b'~' as i64 || val == b'&' as i64)
+                    {
+                        *running = true
+                    }
+                    ui.label("Input:");
+
+                    ui.add_space(2.0);
+                    ui.label(bf_state.stdout());
+                    ui.label("Output:");
+                    ui.add_space(2.0);
+
+                    ui.vertical(|ui| {
+                        let text_style = TextStyle::Body;
+
+                        ui.style_mut().spacing.scroll = ScrollStyle {
+                            floating: true,
+                            bar_width: 8.0,
+                            floating_width: 8.0,
+                            floating_allocated_width: 6.0,
+                            foreground_color: false,
+
+                            dormant_background_opacity: 0.4,
+                            dormant_handle_opacity: 0.4,
+
+                            active_background_opacity: 0.6,
+                            active_handle_opacity: 0.6,
+
+                            interact_background_opacity: 0.8,
+                            interact_handle_opacity: 0.8,
+                            ..ScrollStyle::solid()
+                        };
+                        ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+                            .show_rows(
+                                ui,
+                                ui.text_style_height(&text_style),
+                                bf_state.stack().len(),
+                                |ui, row_range| {
+                                    let painter = ui.painter();
+                                    painter.rect_filled(
+                                        ui.clip_rect(),
+                                        5.0,
+                                        ui.visuals().faint_bg_color,
+                                    );
+                                    for value in row_range {
+                                        ui.label(bf_state.stack()[value].to_string());
+                                    }
+                                },
+                            );
+                    });
                 });
-            });
+            }
+            Mode::Editing { .. } => {
+                ui.label("Version:");
+                let version = self.settings.befunge_version;
+                if ui
+                    .add(egui::Button::selectable(
+                        matches!(version, BefungeVersionDiscriminants::Befunge93),
+                        "64 bit Befunge93",
+                    ))
+                    .clicked()
+                {
+                    self.settings.befunge_version = BefungeVersionDiscriminants::Befunge93
+                };
+                if ui
+                    .add(egui::Button::selectable(
+                        matches!(version, BefungeVersionDiscriminants::Befunge93Mini),
+                        "8 bit Befunge93",
+                    ))
+                    .clicked()
+                {
+                    self.settings.befunge_version = BefungeVersionDiscriminants::Befunge93Mini
+                };
+            }
         }
     }
 

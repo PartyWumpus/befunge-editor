@@ -4,22 +4,21 @@ use egui::{
     ahash::{HashSet, HashSetExt},
 };
 use rand::Rng;
+use std::iter;
 
 use egui::ahash::HashMap;
 
 use crate::{
     app::{self, Settings},
     befunge::{
-        Befunge, Direction, FungeSpaceTrait, GraphicalEvent, Graphics, Position, StepStatus, Value,
-        Visited, WhereVisited,
+        Befunge, Direction, GraphicalEvent, Graphics, Position, StepStatus, Value, Visited,
+        WhereVisited,
     },
 };
 
 #[derive(Clone)]
 pub struct FungeSpace {
-    map: HashMap<Position, Value>,
-    zero_page: Box<[Value; 100]>,
-    max_size: (i64, i64),
+    zero_page: Box<[i8; 128 * 128]>,
 }
 
 #[derive(Clone)]
@@ -27,12 +26,12 @@ pub struct State {
     pub instruction_count: usize,
     pub map: FungeSpace,
     pub string_mode: bool,
-    pub position: Position,
+    pub position: (i8, i8),
     pub direction: Direction,
     pub pos_history: HashMap<Position, Visited>,
     pub get_history: HashMap<Position, Instant>,
     pub put_history: HashMap<Position, Instant>,
-    pub stack: Vec<Value>,
+    pub stack: Vec<i8>,
     pub output: String,
     pub graphics: Option<Graphics>,
     pub breakpoints: HashSet<Position>,
@@ -40,94 +39,69 @@ pub struct State {
     pub input_buffer: String,
 }
 
-impl FungeSpaceTrait for FungeSpace {
-    fn set(&mut self, pos: Position, val: Value) {
-        if pos.0 < 0 || pos.1 < 0 {
-            return;
-        };
-
-        self.set_inner(pos, val);
-    }
-
-    fn get(&self, pos: Position) -> Value {
-        if pos.0 < 0 || pos.1 < 0 {
-            return 0;
-        }
-        if pos.0 < 10 && pos.1 < 10 {
-            self.zero_page[(pos.0 + pos.1 * 10) as usize]
-        } else {
-            *self.map.get(&pos).unwrap_or(&(b' ' as Value))
-        }
-    }
-
-    fn entries(&self) -> impl Iterator<Item = (Position, Value)> {
-        self.map
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .chain(self.zero_page.iter().enumerate().map(|(i, val)| {
-                let i = i as i64;
-                ((i % 10, i / 10), *val)
-            }))
-    }
-
-    fn program_size(&self) -> (i64, i64) {
-        self.max_size
-    }
-}
+// TODO: implement FungeSpaceTrait
 
 impl FungeSpace {
     pub fn new() -> Self {
         Self {
-            map: HashMap::default(),
-            zero_page: Box::new([b' '.into(); 100]),
-            max_size: (11, 11),
+            zero_page: Box::new([b' ' as i8; 128 * 128]),
         }
     }
 
-    pub fn new_from_fungespace(mut input: app::FungeSpace) -> Self {
-        let mut zero_page = Box::new([b' '.into(); 100]);
-        let max_size = input.program_size();
-        for idx in 0..100 {
-            if let Some(val) = input.map.remove(&(idx % 10, idx / 10)) {
-                zero_page[idx as usize] = val;
+    pub fn new_from_fungespace(input: app::FungeSpace) -> Self {
+        let mut map = FungeSpace::new();
+        for ((x, y), char) in input.map {
+            if let Ok(x) = x.try_into()
+                && let Ok(y) = y.try_into()
+            {
+                map.set((x, y), char as i8);
             }
         }
-        Self {
-            map: input.map,
-            zero_page,
-            max_size,
-        }
+        map
     }
 
-    fn set_inner(&mut self, pos: Position, val: Value) {
+    pub fn set(&mut self, pos: (i8, i8), val: i8) {
         if pos.0 < 0 || pos.1 < 0 {
             return;
         };
 
-        if pos.0 < 10 && pos.1 < 10 {
-            self.zero_page[(pos.0 + pos.1 * 10) as usize] = val
-        } else {
-            if val == b' ' as Value {
-                self.map.remove(&pos);
-            } else {
-                self.map.insert(pos, val);
-            }
-
-            if pos.0 > self.max_size.0 {
-                self.max_size.0 = pos.0
-            }
-            if pos.1 > self.max_size.1 {
-                self.max_size.1 = pos.1
-            }
-        };
+        self.zero_page[(pos.0 as usize) + (pos.1 as usize) * 128] = val
     }
 
-    pub fn get_nullable(&self, pos: Position) -> Option<Value> {
-        if pos.0 < 10 && pos.1 < 10 {
-            Some(self.zero_page[usize::try_from(pos.0 + pos.1 * 10).unwrap()])
-        } else {
-            self.map.get(&pos).copied()
+    pub fn get(&self, pos: (i8, i8)) -> i8 {
+        if pos.0 < 0 || pos.1 < 0 {
+            return 0;
+        };
+
+        self.zero_page[(pos.0 as usize) + (pos.1 as usize) * 128]
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (Position, i8)> {
+        self.zero_page.iter().enumerate().map(|(i, val)| {
+            let i = i as i64;
+            ((i % 127, i / 127), *val)
+        })
+    }
+
+    pub fn serialize(&self) -> String {
+        let mut lines: Vec<Vec<char>> = vec![vec![]; 127];
+        for ((x, y), val) in self.entries() {
+            let line = &mut lines[y as usize];
+            if line.len() <= x as usize {
+                line.extend(iter::repeat_n(' ', x as usize - line.len()));
+                assert_ne!(val, b'\n' as i8);
+                assert_ne!(val, b'\r' as i8);
+                line.push(char::from_u32(val as u32).expect("wawa"));
+            } else {
+                line[x as usize] = char::from_u32(val as u32).expect("wawa");
+            };
         }
+        let mut out = String::new();
+        for line in lines {
+            out += &line.iter().collect::<String>();
+            out += "\n";
+        }
+        out
     }
 }
 
@@ -153,7 +127,7 @@ impl Default for State {
 }
 
 impl State {
-    fn pop(&mut self) -> Value {
+    fn pop(&mut self) -> i8 {
         self.stack.pop().unwrap_or(0)
     }
 
@@ -168,7 +142,7 @@ impl State {
         let (x, y) = self.position;
         self.step_position_inner();
         if settings.pos_history.0 {
-            if let Some(visited) = self.pos_history.get_mut(&(x, y)) {
+            if let Some(visited) = self.pos_history.get_mut(&(x as i64, y as i64)) {
                 match self.direction {
                     Direction::North => {
                         visited.wawa.set_north(true);
@@ -189,7 +163,7 @@ impl State {
                 }
             } else {
                 self.pos_history.insert(
-                    (x, y),
+                    (x as i64, y as i64),
                     match self.direction {
                         Direction::North => Visited {
                             wawa: WhereVisited::new().with_north(true),
@@ -227,14 +201,14 @@ impl State {
         }
 
         if self.position.0 == -1 {
-            self.position.0 = self.map.max_size.0.saturating_add(1);
-        } else if self.position.0.wrapping_sub(1) >= self.map.max_size.0 {
+            self.position.0 = 127;
+        } else if self.position.0.wrapping_sub(1) == 127 {
             self.position.0 = 0
         };
 
         if self.position.1 == -1 {
-            self.position.1 = self.map.max_size.1.saturating_add(1);
-        } else if self.position.1.wrapping_sub(1) >= self.map.max_size.1 {
+            self.position.1 = 127;
+        } else if self.position.1.wrapping_sub(1) == 127 {
             self.position.1 = 0
         };
     }
@@ -242,7 +216,10 @@ impl State {
     pub fn step(&mut self, settings: &Settings) -> StepStatus {
         self.instruction_count += 1;
         let status = self.step_inner(settings);
-        if self.breakpoints.contains(&self.position) {
+        if self
+            .breakpoints
+            .contains(&(self.position.0 as i64, self.position.1 as i64))
+        {
             return StepStatus::Breakpoint;
         }
         // skip up to 100 spaces if not in string mode
@@ -250,7 +227,7 @@ impl State {
             let mut safety_counter = 0;
             loop {
                 safety_counter += 1;
-                if safety_counter < 1000 && self.map.get(self.position) == b' ' as Value {
+                if safety_counter < 1000 && self.map.get(self.position) == b' ' as i8 {
                     self.step_position(settings);
                 } else {
                     break;
@@ -261,33 +238,27 @@ impl State {
     }
 
     fn step_inner(&mut self, settings: &Settings) -> StepStatus {
-        let op = self.map.get_nullable(self.position);
+        let op = self.map.get(self.position);
 
         if self.string_mode {
-            let op = op.unwrap_or(b' ' as Value);
-            if op == b'"' as Value {
+            if op == b'"' as i8 {
                 self.string_mode = false;
             } else {
                 self.stack.push(op);
             }
             self.step_position(settings);
             StepStatus::Normal
-        } else if let Some(op) = op {
-            if let Ok(op) = op.try_into() {
-                let status = self.do_op(op, settings);
-                match status {
-                    StepStatus::Normal | StepStatus::SyncFrame => {
-                        self.step_position(settings);
-                    }
-                    _ => (),
-                };
-                status
-            } else {
-                StepStatus::Error("Invalid operation")
-            }
+        } else if let Ok(op) = op.try_into() {
+            let status = self.do_op(op, settings);
+            match status {
+                StepStatus::Normal | StepStatus::SyncFrame => {
+                    self.step_position(settings);
+                }
+                _ => (),
+            };
+            status
         } else {
-            self.step_position(settings);
-            StepStatus::Normal
+            StepStatus::Error("Invalid operation")
         }
     }
 
@@ -295,7 +266,7 @@ impl State {
         match op {
             b'"' => self.string_mode = true,
 
-            b'0'..=b'9' => self.stack.push((op - b'0').into()),
+            b'0'..=b'9' => self.stack.push((op - b'0') as i8),
 
             // 2 op operations
             b'+' => {
@@ -393,12 +364,14 @@ impl State {
                 let value = self.pop();
 
                 if settings.put_history.0 {
-                    if let Some(prev_time) = self.put_history.get(&(x, y)) {
+                    if let Some(prev_time) = self.put_history.get(&(x as i64, y as i64)) {
                         if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
-                            self.put_history.insert((x, y), Instant::recent());
+                            self.put_history
+                                .insert((x as i64, y as i64), Instant::recent());
                         }
                     } else {
-                        self.put_history.insert((x, y), Instant::recent());
+                        self.put_history
+                            .insert((x as i64, y as i64), Instant::recent());
                     }
                 }
 
@@ -412,12 +385,14 @@ impl State {
                 self.stack.push(self.map.get((x, y)));
 
                 if settings.get_history.0 {
-                    if let Some(prev_time) = self.get_history.get(&(x, y)) {
+                    if let Some(prev_time) = self.get_history.get(&(x as i64, y as i64)) {
                         if prev_time.elapsed_since_recent() > Duration::from_millis(500) {
-                            self.get_history.insert((x, y), Instant::recent());
+                            self.get_history
+                                .insert((x as i64, y as i64), Instant::recent());
                         }
                     } else {
-                        self.get_history.insert((x, y), Instant::recent());
+                        self.get_history
+                            .insert((x as i64, y as i64), Instant::recent());
                     }
                 }
             }
@@ -431,7 +406,7 @@ impl State {
                         None => return StepStatus::Breakpoint,
                         Some(val @ '0'..='9') => {
                             num *= 10;
-                            num += (val as u8 - b'0') as Value;
+                            num += (val as u8 - b'0') as i8;
                         }
                         Some(' ') => {
                             self.stack.push(num);
@@ -450,7 +425,7 @@ impl State {
                 match itr.next() {
                     None => return StepStatus::Breakpoint,
                     Some(chr) => {
-                        self.stack.push(chr as Value);
+                        self.stack.push(chr as i8);
                         self.input_buffer = itr.as_str().into();
                     }
                 }
@@ -478,8 +453,7 @@ impl State {
                 let y = self.pop();
                 let x = self.pop();
 
-                if y <= 0 || x <= 0 || x > Graphics::MAX_IMAGE_SIZE || y > Graphics::MAX_IMAGE_SIZE
-                {
+                if y <= 0 || x <= 0 {
                     return StepStatus::Error("Out of bounds graphical operation");
                 }
 
@@ -489,17 +463,11 @@ impl State {
             b'f' => {
                 // configure color
                 if let Some(graphics) = &mut self.graphics {
-                    let r = self.stack.pop().unwrap_or(0).try_into();
-                    let g = self.stack.pop().unwrap_or(0).try_into();
-                    let b = self.stack.pop().unwrap_or(0).try_into();
-                    if let Ok(r) = r
-                        && let Ok(g) = g
-                        && let Ok(b) = b
-                    {
-                        graphics.current_color = Color32::from_rgb(r, g, b);
-                    } else {
-                        return StepStatus::Error("Out of bounds graphical operation");
-                    }
+                    let r = self.stack.pop().unwrap_or(0) as u8;
+                    let g = self.stack.pop().unwrap_or(0) as u8;
+                    let b = self.stack.pop().unwrap_or(0) as u8;
+
+                    graphics.current_color = Color32::from_rgb(r, g, b);
                 }
             }
 
@@ -509,7 +477,7 @@ impl State {
                     let y = self.stack.pop().unwrap_or(0);
                     let x = self.stack.pop().unwrap_or(0);
 
-                    return graphics.pixel(x, y);
+                    return graphics.pixel(x as i64, y as i64);
                 }
             }
 
@@ -525,11 +493,11 @@ impl State {
             b'l' => {
                 // line
                 if let Some(graphics) = &mut self.graphics {
-                    let y1: i32 = self.stack.pop().unwrap_or(0).try_into().unwrap();
-                    let x1: i32 = self.stack.pop().unwrap_or(0).try_into().unwrap();
+                    let y1 = self.stack.pop().unwrap_or(0) as i32;
+                    let x1 = self.stack.pop().unwrap_or(0) as i32;
 
-                    let y2: i32 = self.stack.pop().unwrap_or(0).try_into().unwrap();
-                    let x2: i32 = self.stack.pop().unwrap_or(0).try_into().unwrap();
+                    let y2 = self.stack.pop().unwrap_or(0) as i32;
+                    let x2 = self.stack.pop().unwrap_or(0) as i32;
 
                     if x1 >= graphics.size.0 as i32
                         || y1 >= graphics.size.1 as i32
@@ -552,7 +520,9 @@ impl State {
                             GraphicalEvent::Close => self.stack.extend([1]),
                             //Event::KeyDown(key) => self.stack.extend([key,2]),
                             //Event::KeyUp(key) => self.stack.extend([key,3]),
-                            GraphicalEvent::MouseClick((x, y)) => self.stack.extend([x, y, 4]),
+                            GraphicalEvent::MouseClick((x, y)) => {
+                                self.stack.extend([x as i8, y as i8, 4])
+                            }
                         }
                     } else {
                         self.stack.push(0);
@@ -571,17 +541,17 @@ impl State {
 
 impl Befunge for State {
     fn get(&self, pos: Position) -> Value {
-        self.map.get(pos)
+        self.map.get((pos.0 as i8, pos.1 as i8)) as Value
     }
     fn set(&mut self, pos: Position, val: Value) {
-        self.map.set(pos, val);
+        self.map.set((pos.0 as i8, pos.1 as i8), val as i8);
     }
     fn step(&mut self, settings: &Settings) -> StepStatus {
         self.step(settings)
     }
 
     fn program_size(&self) -> Position {
-        self.map.max_size
+        (128, 128)
     }
     fn instruction_count(&self) -> usize {
         self.instruction_count
@@ -590,14 +560,14 @@ impl Befunge for State {
         self.string_mode
     }
     fn cursor_position(&self) -> Position {
-        self.position
+        (self.position.0 as i64, self.position.1 as i64)
     }
     fn cursor_direction(&self) -> Direction {
         self.direction
     }
 
-    fn stack(&self) -> Vec<Value> {
-        self.stack.clone()
+    fn stack(&self) -> Vec<i64> {
+        self.stack.iter().map(|a| *a as i64).collect::<Vec<_>>()
     }
     fn stdout(&self) -> &str {
         &self.output
