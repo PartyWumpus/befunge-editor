@@ -10,6 +10,7 @@ use egui::{
 };
 use egui_material_icons::icons;
 use include_dir::{Dir, include_dir};
+use rfd::FileHandle;
 use std::future::Future;
 use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -32,6 +33,11 @@ macro_rules! icon {
 }
 
 const SHORTCUT_SWAP_MODE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
+
+const SHORTCUT_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const SHORTCUT_SAVE_AS: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
+const SHORTCUT_RELOAD_FILE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
 
 const SHORTCUT_UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
 const SHORTCUT_REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
@@ -77,6 +83,7 @@ impl CursorState {
 #[derive(Clone, Default)]
 pub struct FungeSpace {
     pub map: HashMap<Position, Value>,
+    dirty: bool,
 }
 type UndoList = Vec<(Box<[((i64, i64), i64)]>, bool)>;
 type RedoList = Vec<Box<[((i64, i64), i64)]>>;
@@ -86,6 +93,8 @@ impl FungeSpaceTrait for FungeSpace {
         if pos.0 < 0 || pos.1 < 0 {
             return;
         };
+
+        self.dirty = true;
 
         if val == b' ' as Value {
             self.map.remove(&pos);
@@ -343,11 +352,26 @@ enum ModalState {
     SetPosition(i64, i64),
 }
 
+#[derive(Clone)]
+enum File {
+    Handle(FileHandle),
+    Filename(String),
+}
+
+impl File {
+    fn file_name(&self) -> String {
+        match self {
+            Self::Handle(handle) => handle.file_name(),
+            Self::Filename(filename) => filename.clone(),
+        }
+    }
+}
+
 pub struct App {
     texture: TextureHandle,
     text_channel: (
-        Sender<(String, Option<String>)>,
-        Receiver<(String, Option<String>)>,
+        Sender<(FileHandle, Option<String>)>,
+        Receiver<(FileHandle, Option<String>)>,
     ),
     settings: Settings,
     mode: Mode,
@@ -357,7 +381,7 @@ pub struct App {
     cursor_pos: (i64, i64),
     popup_pos: Option<(i64, i64)>,
     char_renderer: CharRenderer,
-    filename: Option<String>,
+    file: Option<File>,
 }
 
 fn poss(pos: (f32, f32)) -> Pos2 {
@@ -689,7 +713,7 @@ impl App {
                 egui::TextureOptions::NEAREST,
             ),
             char_renderer: CharRenderer::empty(),
-            filename: None,
+            file: None,
         }
     }
 }
@@ -734,8 +758,15 @@ impl eframe::App for App {
             }
         }
 
-        if let Ok((filename, text)) = self.text_channel.1.try_recv() {
-            self.filename = Some(filename);
+        if let Ok((file, text)) = self.text_channel.1.try_recv() {
+            self.file = Some(File::Handle(file));
+            if let Mode::Editing {
+                fungespace: FungeSpace { dirty, .. },
+                ..
+            } = &mut self.mode
+            {
+                *dirty = false;
+            }
             if let Some(text) = text {
                 self.mode = Mode::Editing {
                     undos: Vec::new(),
@@ -1009,6 +1040,7 @@ impl eframe::App for App {
 impl App {
     fn befunge_input(&mut self, ui: &mut egui::Ui) {
         puffin::profile_function!();
+
         ui.input_mut(|e| {
             if e.consume_shortcut(&SHORTCUT_SWAP_MODE) {
                 self.mode.swap_mode(&self.settings);
@@ -1087,6 +1119,66 @@ impl App {
 
                     if e.consume_key(Modifiers::NONE, egui::Key::Backspace) {
                         cursor_state.step_cursor_back(&self.settings);
+                    }
+
+                    let save_as = e.consume_shortcut(&SHORTCUT_SAVE_AS);
+                    let save = e.consume_shortcut(&SHORTCUT_SAVE);
+                    let reload = e.consume_shortcut(&SHORTCUT_RELOAD_FILE);
+                    // on wasm FileHandles are EITHER read or write + reusing them doesn't work great
+                    // anyways so don't reuse on wasm
+                    let can_refresh_save = matches!(self.file, Some(File::Handle(_)))
+                        && cfg!(not(target_arch = "wasm32"));
+
+                    // duplicate of code in the File menu :/
+                    if save_as || (save && !can_refresh_save) {
+                        let sender = self.text_channel.0.clone();
+                        let mut task = rfd::AsyncFileDialog::new();
+                        if let Some(file) = &self.file {
+                            task = task.set_file_name(file.file_name());
+                        }
+
+                        let task = task.save_file();
+                        let contents = fungespace.serialize();
+
+                        let ctx = ui.ctx().clone();
+                        execute(async move {
+                            let file = task.await;
+                            if let Some(file) = file {
+                                _ = file.write(contents.as_bytes()).await;
+                                let _ = sender.send((file, None));
+                                ctx.request_repaint();
+                            }
+                        });
+                    }
+
+                    if can_refresh_save
+                        && save
+                        && let Some(File::Handle(file)) = self.file.clone()
+                    {
+                        let sender = self.text_channel.0.clone();
+                        let contents = fungespace.serialize();
+
+                        let ctx = ui.ctx().clone();
+                        execute(async move {
+                            _ = file.write(contents.as_bytes()).await;
+                            let _ = sender.send((file.clone(), None));
+                            ctx.request_repaint();
+                        });
+                    }
+
+                    if can_refresh_save
+                        && reload
+                        && let Some(File::Handle(file)) = &self.file
+                    {
+                        let sender = self.text_channel.0.clone();
+                        let ctx = ui.ctx().clone();
+                        let file = file.clone();
+                        execute(async move {
+                            let text = file.read().await;
+                            let _ = sender
+                                .send((file, Some(String::from_utf8_lossy(&text).to_string())));
+                            ctx.request_repaint();
+                        });
                     }
 
                     if e.consume_shortcut(&SHORTCUT_REDO) || e.consume_shortcut(&SHORTCUT_REDO_ALT)
@@ -1759,11 +1851,18 @@ impl App {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         puffin::profile_function!();
+
+        macro_rules! shortcut {
+            ($icon:expr) => {
+                $icon.format(&SYMBOLS, ctx.os().is_mac())
+            };
+        }
+
         egui::MenuBar::new().ui(ui, |ui| {
             let is_web = cfg!(target_arch = "wasm32");
             ui.menu_button("File", |ui| {
                 if ui.button("📄 New").clicked() {
-                    self.filename = None;
+                    self.file = None;
                     self.mode = Mode::Editing {
                         undos: Vec::new(),
                         redos: Vec::new(),
@@ -1775,28 +1874,41 @@ impl App {
                 if ui.button("📂 Open").clicked() {
                     let sender = self.text_channel.0.clone();
                     let task = rfd::AsyncFileDialog::new().pick_file();
-                    // Context is wrapped in an Arc so it's cheap to clone as per:
-                    // > Context is cheap to clone, and any clones refers to the same mutable data (Context uses refcounting internally).
-                    // Taken from https://docs.rs/egui/0.24.1/egui/struct.Context.html
+
                     let ctx = ui.ctx().clone();
                     execute(async move {
                         let file = task.await;
                         if let Some(file) = file {
                             let text = file.read().await;
-                            let _ = sender.send((
-                                file.file_name(),
-                                Some(String::from_utf8_lossy(&text).to_string()),
-                            ));
+                            let _ = sender
+                                .send((file, Some(String::from_utf8_lossy(&text).to_string())));
                             ctx.request_repaint();
                         }
                     });
                 }
 
-                if ui.button("💾 Save").clicked() {
+                let save = ui
+                    .add(egui::Button::new("💾 Save").shortcut_text(shortcut!(SHORTCUT_SAVE)))
+                    .clicked();
+                let save_as = ui
+                    .add(egui::Button::new("💾 Save As").shortcut_text(shortcut!(SHORTCUT_SAVE_AS)))
+                    .clicked();
+                let reload = ui
+                    .add(
+                        egui::Button::new(icon!(icons::ICON_REPLAY, "Reload"))
+                            .shortcut_text(shortcut!(SHORTCUT_RELOAD_FILE)),
+                    )
+                    .clicked();
+                // on wasm FileHandles are EITHER read or write + reusing them doesn't work great
+                // anyways so don't reuse on wasm
+                let can_refresh_save =
+                    matches!(self.file, Some(File::Handle(_))) && cfg!(not(target_arch = "wasm32"));
+
+                if save_as || (save && !can_refresh_save) {
                     let sender = self.text_channel.0.clone();
                     let mut task = rfd::AsyncFileDialog::new();
-                    if let Some(filename) = &self.filename {
-                        task = task.set_file_name(filename);
+                    if let Some(file) = &self.file {
+                        task = task.set_file_name(file.file_name());
                     }
 
                     let task = task.save_file();
@@ -1805,12 +1917,47 @@ impl App {
                         Mode::Editing { fungespace, .. } => fungespace.serialize(),
                     };
 
+                    let ctx = ui.ctx().clone();
                     execute(async move {
                         let file = task.await;
                         if let Some(file) = file {
                             _ = file.write(contents.as_bytes()).await;
-                            let _ = sender.send((file.file_name(), None));
+                            let _ = sender.send((file, None));
+                            ctx.request_repaint();
                         }
+                    });
+                }
+
+                if can_refresh_save
+                    && save
+                    && let Some(File::Handle(file)) = self.file.clone()
+                {
+                    let sender = self.text_channel.0.clone();
+                    let contents = match &mut self.mode {
+                        Mode::Playing { bf_state, .. } => bf_state.serialize(),
+                        Mode::Editing { fungespace, .. } => fungespace.serialize(),
+                    };
+
+                    let ctx = ui.ctx().clone();
+                    execute(async move {
+                        _ = file.write(contents.as_bytes()).await;
+                        let _ = sender.send((file.clone(), None));
+                        ctx.request_repaint();
+                    });
+                }
+
+                if can_refresh_save
+                    && reload
+                    && let Some(File::Handle(file)) = &self.file
+                {
+                    let sender = self.text_channel.0.clone();
+                    let ctx = ui.ctx().clone();
+                    let file = file.clone();
+                    execute(async move {
+                        let text = file.read().await;
+                        let _ =
+                            sender.send((file, Some(String::from_utf8_lossy(&text).to_string())));
+                        ctx.request_repaint();
                     });
                 }
 
@@ -1820,13 +1967,13 @@ impl App {
                             .button(file.path().file_stem().unwrap().to_string_lossy())
                             .clicked()
                         {
-                            self.filename = Some(
+                            self.file = Some(File::Filename(
                                 file.path()
                                     .file_name()
                                     .unwrap()
                                     .to_string_lossy()
                                     .to_string(),
-                            );
+                            ));
                             self.mode = Mode::Editing {
                                 undos: Vec::new(),
                                 redos: Vec::new(),
@@ -1970,9 +2117,17 @@ impl App {
                 ui.label(RichText::new(error.to_string()).color(Color32::RED));
             }
 
-            if let Some(filename) = &self.filename {
+            if let Some(file) = &self.file {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(filename);
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if let Mode::Editing {
+                        fungespace: FungeSpace { dirty: true, .. },
+                        ..
+                    } = &mut self.mode
+                    {
+                        ui.label("*");
+                    }
+                    ui.label(file.file_name());
                 });
             }
         });

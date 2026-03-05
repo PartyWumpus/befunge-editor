@@ -20,7 +20,7 @@ To run: `cargo run --release`
 
 ## Features I would like to add in future:
 
-- A reload file hotkey (possibly a "clever" one like befunexec that keeps the state?), although won't nicely work on the web
+- Manage shortcuts better instead of duplicating code all the time
 - Watching the values of locations (like befunexec)
 - Breakpoints that pause on value change
 - Some of the preprocessor things from befunexec (break & watch, but not replace)
