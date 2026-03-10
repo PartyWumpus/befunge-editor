@@ -428,7 +428,14 @@ impl State {
                 let mut num = 0;
                 loop {
                     match itr.next() {
-                        None => return StepStatus::Breakpoint,
+                        None => {
+                            if settings.non_blocking_input {
+                                self.stack.push(-1);
+                                return StepStatus::Normal;
+                            } else {
+                                return StepStatus::Breakpoint;
+                            }
+                        }
                         Some(val @ '0'..='9') => {
                             num *= 10;
                             num += (val as u8 - b'0') as Value;
@@ -448,7 +455,13 @@ impl State {
             b'~' => {
                 let mut itr = self.input_buffer.chars();
                 match itr.next() {
-                    None => return StepStatus::Breakpoint,
+                    None => {
+                        if settings.non_blocking_input {
+                            self.stack.push(-1);
+                        } else {
+                            return StepStatus::Breakpoint;
+                        }
+                    }
                     Some(chr) => {
                         self.stack.push(chr as Value);
                         self.input_buffer = itr.as_str().into();

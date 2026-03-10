@@ -183,6 +183,7 @@ pub struct Settings {
     pub run_until_breakpoint: bool,
     pub invalid_operation_behaviour: InvalidOperationBehaviour,
     pub befunge_version: BefungeVersionDiscriminants,
+    pub non_blocking_input: bool,
 }
 
 impl Default for Settings {
@@ -196,7 +197,8 @@ impl Default for Settings {
             run_until_breakpoint: false,
             render_unicode: true,
             invalid_operation_behaviour: InvalidOperationBehaviour::Halt,
-            befunge_version: BefungeVersionDiscriminants::Befunge93Mini,
+            befunge_version: BefungeVersionDiscriminants::Befunge93,
+            non_blocking_input: false,
         }
     }
 }
@@ -1144,8 +1146,9 @@ impl App {
                         execute(async move {
                             let file = task.await;
                             if let Some(file) = file {
-                                _ = file.write(contents.as_bytes()).await;
-                                let _ = sender.send((file, None));
+                                if file.write(contents.as_bytes()).await.is_ok() {
+                                    let _ = sender.send((file, None));
+                                }
                                 ctx.request_repaint();
                             }
                         });
@@ -1160,8 +1163,9 @@ impl App {
 
                         let ctx = ui.ctx().clone();
                         execute(async move {
-                            _ = file.write(contents.as_bytes()).await;
-                            let _ = sender.send((file.clone(), None));
+                            if file.write(contents.as_bytes()).await.is_ok() {
+                                let _ = sender.send((file, None));
+                            }
                             ctx.request_repaint();
                         });
                     }
@@ -1894,7 +1898,8 @@ impl App {
                     .add(egui::Button::new("💾 Save As").shortcut_text(shortcut!(SHORTCUT_SAVE_AS)))
                     .clicked();
                 let reload = ui
-                    .add(
+                    .add_enabled(
+                        matches!(self.file, Some(File::Handle(_))),
                         egui::Button::new(icon!(icons::ICON_REPLAY, "Reload"))
                             .shortcut_text(shortcut!(SHORTCUT_RELOAD_FILE)),
                     )
@@ -2330,6 +2335,7 @@ impl App {
         ui.horizontal(|ui| ui.checkbox(&mut settings.get_history.0, "Enabled"));
 
         ui.separator();
+        ui.horizontal(|ui| ui.checkbox(&mut settings.non_blocking_input, "Non-blocking input"));
         ui.horizontal(|ui| ui.checkbox(&mut settings.run_until_breakpoint, "Run until breakpoint (DANGER)").on_hover_text("Will freeze the UI while working.\nIf there are no breakpoints then this effectively crashes the app."));
 
         ui.separator();

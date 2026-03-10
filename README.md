@@ -27,7 +27,8 @@ To run: `cargo run --release`
 - A better way to move the screen large distances. Possibly a "minimap" style thing?
 - Undo in play mode
 - A befunge98 mode
-
+- Profile file threads
+- Configurable "what to do on # at program edge"
 
 ## Thanks
 
