@@ -120,7 +120,7 @@ impl FungeSpaceTrait for FungeSpace {
 
     fn get(&self, pos: Position) -> Value {
         if pos.0 < 0 || pos.1 < 0 {
-            return 0;
+            return b' ' as i64;
         }
         *self.map.get(&pos).unwrap_or(&(b' ' as Value))
     }
@@ -1906,8 +1906,8 @@ impl App {
                         ),
                     );
 
-                    for x in integer_clip_rect.0.0.max(0)..=integer_clip_rect.1.0 {
-                        for y in integer_clip_rect.0.1.max(0)..=integer_clip_rect.1.1 {
+                    for x in integer_clip_rect.0.0..=integer_clip_rect.1.0 {
+                        for y in integer_clip_rect.0.1..=integer_clip_rect.1.1 {
                             let pos = recter((x, y), self.scene_offset);
                             let val = match &mut self.mode {
                         Mode::Playing { bf_state, .. } => bf_state.get((x, y)),
