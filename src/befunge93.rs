@@ -614,7 +614,7 @@ impl Befunge for State {
         }
     }
 
-    fn stack(&self) -> Vec<Value> {
+    fn stack(&self, _index: usize) -> Vec<Value> {
         self.stack.clone()
     }
     fn stdout(&self) -> &str {

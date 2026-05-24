@@ -370,7 +370,7 @@ pub trait Befunge {
     fn cursor_direction(&self) -> (Value, Value);
 
     // TODO: make this &[Value]
-    fn stack(&self) -> Vec<Value>;
+    fn stack(&self, index: usize) -> Vec<Value>;
     fn stdout(&self) -> &str;
     fn stdin(&mut self) -> &mut String;
     fn graphics(&mut self) -> Option<&mut Graphics>;

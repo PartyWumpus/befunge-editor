@@ -1183,9 +1183,8 @@ impl Befunge for State {
         (self.cursors[0].direction.0, self.cursors[0].direction.1)
     }
 
-    fn stack(&self) -> Vec<Value> {
-        // TODO:
-        self.cursors[0].stacks.last().unwrap().clone()
+    fn stack(&self, index: usize) -> Vec<Value> {
+        self.cursors[index].stacks.last().unwrap().clone()
     }
     fn stdout(&self) -> &str {
         &self.state.output

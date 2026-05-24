@@ -588,7 +588,7 @@ impl Befunge for State {
         }
     }
 
-    fn stack(&self) -> Vec<i64> {
+    fn stack(&self, _index: usize) -> Vec<i64> {
         self.stack.iter().map(|a| *a as i64).collect::<Vec<_>>()
     }
     fn stdout(&self) -> &str {

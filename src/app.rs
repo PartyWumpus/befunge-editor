@@ -2514,6 +2514,7 @@ impl App {
                 };
 
                 ui.label("Stack:");
+
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(2.0);
 
@@ -2562,7 +2563,7 @@ impl App {
                             .show_rows(
                                 ui,
                                 ui.text_style_height(&text_style),
-                                bf_state.stack().len(),
+                                bf_state.stack(0).len(),
                                 |ui, row_range| {
                                     let painter = ui.painter();
                                     painter.rect_filled(
@@ -2571,7 +2572,7 @@ impl App {
                                         ui.visuals().faint_bg_color,
                                     );
                                     for value in row_range {
-                                        ui.label(bf_state.stack()[value].to_string());
+                                        ui.label(bf_state.stack(0)[value].to_string());
                                     }
                                 },
                             );
