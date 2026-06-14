@@ -11,6 +11,7 @@ use egui_material_icons::icons;
 use include_dir::{Dir, include_dir};
 use rfd::FileHandle;
 use std::future::Future;
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -80,19 +81,10 @@ pub struct StartConfig {
 }
 
 #[derive(Default, Clone, Copy)]
-pub struct CursorState {
+pub struct CursorCaret {
     location: (i64, i64),
     direction: Direction,
     string_mode: bool,
-}
-
-impl CursorState {
-    fn new(location: (i64, i64)) -> Self {
-        Self {
-            location,
-            ..Default::default()
-        }
-    }
 }
 
 #[derive(Clone, Default)]
@@ -100,7 +92,14 @@ pub struct FungeSpace {
     pub map: HashMap<Position, Value>,
     dirty: bool,
 }
-type UndoList = Vec<(Box<[((i64, i64), i64)]>, bool)>;
+
+#[derive(Clone)]
+enum Undo {
+    Normal(Box<[((i64, i64), i64)]>),
+    Dedupable((i64, i64), i64),
+}
+
+type UndoList = Vec<Undo>;
 type RedoList = Vec<Box<[((i64, i64), i64)]>>;
 
 impl FungeSpaceTrait for FungeSpace {
@@ -159,11 +158,43 @@ impl FungeSpace {
 }
 
 #[derive(Clone)]
+enum CursorSpan {
+    Partial((i64, i64)),
+    Full {
+        original_start: (i64, i64),
+        start: (i64, i64),
+        end: (i64, i64),
+        data: Vec<i64>,
+    },
+}
+
+#[derive(Clone)]
+enum CursorMode {
+    Span(CursorSpan),
+    Caret(CursorCaret),
+}
+
+impl CursorMode {
+    fn caret(location: (i64, i64)) -> Self {
+        Self::Caret(CursorCaret {
+            location,
+            ..Default::default()
+        })
+    }
+}
+
+impl Default for CursorMode {
+    fn default() -> Self {
+        Self::Caret(CursorCaret::default())
+    }
+}
+
+#[derive(Clone)]
 enum Mode {
     Editing {
         undos: UndoList,
         redos: RedoList,
-        cursor_state: CursorState,
+        cursor_mode: CursorMode,
         fungespace: FungeSpace,
         stdin: String,
     },
@@ -430,30 +461,35 @@ fn intersects(a: ((i64, i64), (i64, i64)), b: (i64, i64)) -> bool {
     a.0.0 <= b.0 && b.0 <= a.1.0 && a.0.1 <= b.1 && b.1 <= a.1.1
 }
 
-impl CursorState {
+fn step(mut pos: (i64, i64), direction: Direction, settings: &Settings) -> (i64, i64) {
+    let (x, y) = pos;
+    match direction {
+        Direction::North => pos = (x, y.saturating_sub(1)),
+        Direction::South => pos = (x, y.saturating_add(1)),
+        Direction::East => pos = (x.saturating_add(1), y),
+        Direction::West => pos = (x.saturating_sub(1), y),
+    }
+
+    let border_pos = settings.befunge_version.border_positions();
+    if pos.0 < border_pos.0.0 {
+        pos.0 = border_pos.0.0
+    }
+    if pos.1 < border_pos.0.1 {
+        pos.1 = border_pos.0.1
+    }
+
+    if pos.0 > border_pos.1.0 {
+        pos.0 = border_pos.1.0
+    }
+    if pos.1 > border_pos.1.1 {
+        pos.1 = border_pos.1.1
+    }
+    pos
+}
+
+impl CursorCaret {
     fn step(&mut self, settings: &Settings) {
-        let (x, y) = self.location;
-        match self.direction {
-            Direction::North => self.location = (x, y.saturating_sub(1)),
-            Direction::South => self.location = (x, y.saturating_add(1)),
-            Direction::East => self.location = (x.saturating_add(1), y),
-            Direction::West => self.location = (x.saturating_sub(1), y),
-        }
-
-        let border_pos = settings.befunge_version.border_positions();
-        if self.location.0 < border_pos.0.0 {
-            self.location.0 = border_pos.0.0
-        }
-        if self.location.1 < border_pos.0.1 {
-            self.location.1 = border_pos.0.1
-        }
-
-        if self.location.0 > border_pos.1.0 {
-            self.location.0 = border_pos.1.0
-        }
-        if self.location.1 > border_pos.1.1 {
-            self.location.1 = border_pos.1.1
-        }
+        self.location = step(self.location, self.direction, settings);
     }
 
     fn step_cursor_back(&mut self, settings: &Settings) {
@@ -483,6 +519,60 @@ impl CursorState {
 }
 
 impl Mode {
+    fn set_cursor(
+        cursor_mode: &mut CursorMode,
+        fungespace: &mut FungeSpace,
+        undos: &mut UndoList,
+        redos: &mut RedoList,
+        new_mode: CursorMode,
+    ) {
+        let old = mem::replace(cursor_mode, new_mode);
+        if let CursorMode::Span(CursorSpan::Full {
+            start,
+            end,
+            data,
+            original_start,
+        }) = old
+        {
+            let mut ops = vec![];
+            for y in 0..=end.1 - start.1 {
+                for x in 0..=end.0 - start.0 {
+                    let pos = (x + start.0, y + start.1);
+                    let val = data[(x + y * (end.0 - start.0 + 1)) as usize];
+                    if original_start != start {
+                        ops.push((pos, fungespace.get(pos)));
+                        ops.push(((x + original_start.0, y + original_start.1), val));
+                    }
+                    fungespace.set(pos, val);
+                }
+            }
+            if original_start != start {
+                undos.push(Undo::Normal(ops.into()));
+                redos.clear();
+            }
+        }
+    }
+
+    fn reset_cursor(
+        cursor_mode: &mut CursorMode,
+        fungespace: &mut FungeSpace,
+        undos: &mut UndoList,
+        redos: &mut RedoList,
+    ) {
+        let pos = *match cursor_mode {
+            CursorMode::Span(CursorSpan::Partial(pos)) => pos,
+            CursorMode::Span(CursorSpan::Full { start, .. }) => start,
+            CursorMode::Caret(CursorCaret { location, .. }) => location,
+        };
+        Mode::set_cursor(
+            cursor_mode,
+            fungespace,
+            undos,
+            redos,
+            CursorMode::caret(pos),
+        );
+    }
+
     fn swap_mode(&mut self, settings: &Settings) {
         *self = match self.clone() {
             Mode::Editing {
@@ -523,7 +613,7 @@ impl Mode {
             } => Mode::Editing {
                 undos: Vec::new(),
                 redos: Vec::new(),
-                cursor_state: CursorState::new(bf_state.cursor_positions()[0]),
+                cursor_mode: CursorMode::caret(bf_state.cursor_positions()[0]),
                 fungespace: snapshot.0,
                 stdin: snapshot.1,
             },
@@ -714,14 +804,21 @@ impl Mode {
     }
 
     fn undo(fungespace: &mut FungeSpace, undos: &mut UndoList, redos: &mut RedoList) {
-        if let Some((undos, _is_dedupable)) = undos.pop() {
-            let mut ops = vec![];
-            for (pos, val) in undos {
-                ops.push((pos, fungespace.get(pos)));
+        let Some(undo) = undos.pop() else { return };
+        match undo {
+            Undo::Normal(undos) => {
+                let mut ops = vec![];
+                for (pos, val) in undos {
+                    ops.push((pos, fungespace.get(pos)));
+                    fungespace.set(pos, val);
+                }
+                redos.push(ops.into());
+            }
+            Undo::Dedupable(pos, val) => {
+                redos.push(vec![(pos, fungespace.get(pos))].into());
                 fungespace.set(pos, val);
             }
-            redos.push(ops.into());
-        };
+        }
     }
 
     fn redo(fungespace: &mut FungeSpace, undos: &mut UndoList, redos: &mut RedoList) {
@@ -731,7 +828,7 @@ impl Mode {
                 ops.push((pos, fungespace.get(pos)));
                 fungespace.set(pos, val);
             }
-            undos.push((ops.into(), false));
+            undos.push(Undo::Normal(ops.into()));
         };
     }
 }
@@ -772,7 +869,7 @@ impl App {
         let mut mode = Mode::Editing {
             undos: Vec::new(),
             redos: Vec::new(),
-            cursor_state: CursorState::default(),
+            cursor_mode: CursorMode::default(),
             fungespace,
             stdin: String::new(),
         };
@@ -885,7 +982,7 @@ impl App {
                 self.mode = Mode::Editing {
                     undos: Vec::new(),
                     redos: Vec::new(),
-                    cursor_state: CursorState::default(),
+                    cursor_mode: CursorMode::default(),
                     // TODO: support latin-1 as well as utf-8, for the mycology suite
                     // latin-1 mode should turn form feed (12) into nothing
                     fungespace: FungeSpace::new_from_string(&String::from_utf8_lossy(&text)),
@@ -1129,7 +1226,7 @@ impl App {
                         }
                     }
                     Mode::Editing {
-                        cursor_state,
+                        cursor_mode,
                         undos,
                         redos,
                         fungespace,
@@ -1158,20 +1255,36 @@ impl App {
                                 Mode::redo(fungespace, undos, redos);
                             };
                             ui.separator();
-                            ui.label("Cursor direction:");
-                            ui.label(match cursor_state.direction {
-                                Direction::North => "⬆",
-                                Direction::South => "⬇",
-                                Direction::East => "➡",
-                                Direction::West => "⬅",
-                            });
+                            match cursor_mode {
+                                CursorMode::Caret(caret) => {
+                                    ui.label("Cursor direction:");
+                                    ui.label(match caret.direction {
+                                        Direction::North => "⬆",
+                                        Direction::South => "⬇",
+                                        Direction::East => "➡",
+                                        Direction::West => "⬅",
+                                    });
 
-                            ui.label("Cursor mode:");
-                            ui.label(if cursor_state.string_mode {
-                                "String"
-                            } else {
-                                "Normal"
-                            });
+                                    ui.label("Cursor mode:");
+                                    ui.label(if caret.string_mode {
+                                        "String"
+                                    } else {
+                                        "Normal"
+                                    });
+                                }
+                                CursorMode::Span(CursorSpan::Full { start, end, .. }) => {
+                                    ui.label("Selection:");
+                                    display_coordinate(ui, *start);
+                                    ui.label("to");
+                                    display_coordinate(ui, *end);
+                                }
+                                CursorMode::Span(CursorSpan::Partial(start)) => {
+                                    ui.label("Selection:");
+                                    display_coordinate(ui, *start);
+                                    ui.label("to");
+                                    display_coordinate(ui, self.cursor_pos);
+                                }
+                            }
                         });
                     }
                 }
@@ -1196,6 +1309,8 @@ impl App {
 impl App {
     fn befunge_input(&mut self, ui: &mut egui::Ui) {
         puffin::profile_function!();
+
+        let mut clipboard_string = None;
 
         ui.input_mut(|e| {
             if e.consume_shortcut(&SHORTCUT_SWAP_MODE) {
@@ -1260,14 +1375,13 @@ impl App {
                     }
                 }
                 Mode::Editing {
-                    cursor_state,
+                    cursor_mode,
                     fungespace,
                     undos,
                     redos,
                     ..
                 } => {
-                    if let Some(direction) = if e.consume_key(Modifiers::NONE, egui::Key::ArrowDown)
-                    {
+                    let direction = if e.consume_key(Modifiers::NONE, egui::Key::ArrowDown) {
                         Some(Direction::South)
                     } else if e.consume_key(Modifiers::NONE, egui::Key::ArrowUp) {
                         Some(Direction::North)
@@ -1277,13 +1391,33 @@ impl App {
                         Some(Direction::East)
                     } else {
                         None
-                    } {
-                        cursor_state.direction = direction;
-                        cursor_state.step(&self.settings);
                     };
+                    match cursor_mode {
+                        CursorMode::Caret(caret) => {
+                            if let Some(direction) = direction {
+                                caret.direction = direction;
+                                caret.step(&self.settings);
+                            };
 
-                    if e.consume_key(Modifiers::NONE, egui::Key::Backspace) {
-                        cursor_state.step_cursor_back(&self.settings);
+                            if e.consume_key(Modifiers::NONE, egui::Key::Backspace) {
+                                caret.step_cursor_back(&self.settings);
+                            }
+                        }
+                        CursorMode::Span(CursorSpan::Full { start, end, .. }) => {
+                            if let Some(direction) = direction {
+                                let start2 = step(*start, direction, &self.settings);
+                                let end2 = step(*end, direction, &self.settings);
+                                if *start != start2 && *end != end2 {
+                                    *start = start2;
+                                    *end = end2;
+                                }
+                            };
+                        }
+                        _ => (),
+                    }
+
+                    if e.key_pressed(egui::Key::Escape) {
+                        Mode::reset_cursor(cursor_mode, fungespace, undos, redos);
                     }
 
                     let save_as = e.consume_shortcut(&SHORTCUT_SAVE_AS);
@@ -1366,64 +1500,159 @@ impl App {
                         Mode::undo(fungespace, undos, redos);
                     }
 
-                    for event in e.filtered_events(&egui::EventFilter {
-                        tab: true,
-                        escape: false,
-                        horizontal_arrows: true,
-                        vertical_arrows: true,
-                    }) {
-                        match event {
-                            egui::Event::Text(text) => {
-                                let mut ops = vec![];
-                                for char in text.chars() {
-                                    ops.push((
-                                        cursor_state.location,
-                                        fungespace.get(cursor_state.location),
-                                    ));
-                                    fungespace.set(cursor_state.location, char as i64);
+                    enum CursorChange {
+                        Drop,
+                        Clear,
+                        None,
+                    }
 
-                                    if char == '"' {
-                                        cursor_state.string_mode = !cursor_state.string_mode;
-                                    };
+                    let mut reset_cursor = CursorChange::None;
+                    match cursor_mode {
+                        CursorMode::Span(CursorSpan::Full {
+                            start, end, data, ..
+                        }) => {
+                            for event in e.filtered_events(&egui::EventFilter {
+                                tab: true,
+                                escape: false,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                            }) {
+                                match event {
+                                    egui::Event::Copy => {
+                                        let mut str = String::new();
+                                        for y in 0..=end.1 - start.1 {
+                                            for x in 0..=end.0 - start.0 {
+                                                let val =
+                                                    data[(x + y * (end.0 - start.0 + 1)) as usize];
+                                                str.push(u32::try_into(val as u32).unwrap());
+                                            }
+                                            str.push('\n');
+                                        }
+                                        str.pop();
+                                        clipboard_string = Some(str);
+                                        reset_cursor = CursorChange::Drop;
+                                    }
+                                    egui::Event::Cut => {
+                                        let mut str = String::new();
+                                        for y in 0..=end.1 - start.1 {
+                                            for x in 0..=end.0 - start.0 {
+                                                let val =
+                                                    data[(x + y * (end.0 - start.0 + 1)) as usize];
+                                                str.push(u32::try_into(val as u32).unwrap());
+                                            }
+                                            str.push('\n');
+                                        }
+                                        str.pop();
+                                        clipboard_string = Some(str);
 
-                                    if !cursor_state.string_mode {
-                                        match char {
-                                            '>' => cursor_state.direction = Direction::East,
-                                            'v' => cursor_state.direction = Direction::South,
-                                            '<' => cursor_state.direction = Direction::West,
-                                            '^' => cursor_state.direction = Direction::North,
-                                            _ => (),
+                                        reset_cursor = CursorChange::Clear;
+                                    }
+                                    _ => (),
+                                }
+                            }
+                        }
+                        CursorMode::Caret(caret) => {
+                            for event in e.filtered_events(&egui::EventFilter {
+                                tab: true,
+                                escape: false,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                            }) {
+                                match event {
+                                    egui::Event::Text(text) => {
+                                        let mut ops = vec![];
+                                        for char in text.chars() {
+                                            ops.push((
+                                                caret.location,
+                                                fungespace.get(caret.location),
+                                            ));
+                                            fungespace.set(caret.location, char as i64);
+
+                                            if char == '"' {
+                                                caret.string_mode = !caret.string_mode;
+                                            };
+
+                                            if !caret.string_mode {
+                                                match char {
+                                                    '>' => caret.direction = Direction::East,
+                                                    'v' => caret.direction = Direction::South,
+                                                    '<' => caret.direction = Direction::West,
+                                                    '^' => caret.direction = Direction::North,
+                                                    _ => (),
+                                                }
+                                            }
+
+                                            caret.step(&self.settings);
+                                        }
+
+                                        undos.push(Undo::Normal(ops.into()));
+                                        redos.clear();
+                                    }
+                                    egui::Event::Paste(text) => {
+                                        let (mut x, mut y) = caret.location;
+                                        let mut ops = vec![];
+                                        for char in text.chars() {
+                                            if char == '\n' {
+                                                y += 1;
+                                                x = caret.location.0;
+                                                continue;
+                                            };
+                                            ops.push(((x, y), fungespace.get((x, y))));
+                                            fungespace.set((x, y), char as i64);
+                                            x += 1
+                                        }
+                                        undos.push(Undo::Normal(ops.into()));
+                                        redos.clear();
+                                    }
+                                    _ => (),
+                                }
+                            }
+                        }
+                        _ => (),
+                    }
+
+                    match reset_cursor {
+                        CursorChange::Drop => {
+                            Mode::reset_cursor(cursor_mode, fungespace, undos, redos)
+                        }
+                        CursorChange::Clear => {
+                            let pos = *match cursor_mode {
+                                CursorMode::Span(CursorSpan::Partial(pos)) => pos,
+                                CursorMode::Caret(CursorCaret { location, .. }) => location,
+                                CursorMode::Span(CursorSpan::Full {
+                                    start,
+                                    end,
+                                    data,
+                                    original_start,
+                                }) => {
+                                    let mut ops = vec![];
+                                    for y in 0..=end.1 - start.1 {
+                                        for x in 0..=end.0 - start.0 {
+                                            let val =
+                                                data[(x + y * (end.0 - start.0 + 1)) as usize];
+                                            ops.push((
+                                                (x + original_start.0, y + original_start.1),
+                                                val,
+                                            ));
                                         }
                                     }
+                                    undos.push(Undo::Normal(ops.into()));
+                                    redos.clear();
 
-                                    cursor_state.step(&self.settings);
+                                    start
                                 }
-
-                                undos.push((ops.into(), false));
-                                redos.clear();
-                            }
-                            egui::Event::Paste(text) => {
-                                let (mut x, mut y) = cursor_state.location;
-                                let mut ops = vec![];
-                                for char in text.chars() {
-                                    if char == '\n' {
-                                        y += 1;
-                                        x = cursor_state.location.0;
-                                        continue;
-                                    };
-                                    ops.push(((x, y), fungespace.get((x, y))));
-                                    fungespace.set((x, y), char as i64);
-                                    x += 1
-                                }
-                                undos.push((ops.into(), false));
-                                redos.clear();
-                            }
-                            _ => (),
+                            };
+                            *cursor_mode = CursorMode::caret(pos);
                         }
+                        _ => (),
                     }
                 }
             }
         });
+
+        if let Some(clipboard_string) = clipboard_string {
+            ui.copy_text(clipboard_string);
+        }
     }
 
     fn befunge_scene(&mut self, ui: &mut egui::Ui) {
@@ -1431,6 +1660,8 @@ impl App {
         let mut scene = Scene::new()
             .max_inner_size([f32::INFINITY, f32::INFINITY])
             .zoom_range(0.01..=5.0);
+
+        let available_rect = ui.available_rect_before_wrap();
 
         if let Mode::Playing {
             follow: true,
@@ -1511,7 +1742,7 @@ impl App {
             };
         }
 
-        let response = scene
+        let scene_response = scene
             .show(ui, &mut self.scene_rect, |ui| {
                 let painter = ui.painter();
                 let clip_rect = painter.clip_rect();
@@ -1835,34 +2066,60 @@ impl App {
                                 );
                             }
                         }
-                        Mode::Editing { cursor_state, .. } => {
-                            painter.rect(
-                                recter(cursor_state.location, self.scene_offset),
-                                0.0,
-                                if cursor_state.string_mode {
-                                    Color32::LIGHT_GREEN
-                                } else {
-                                    CURSOR_COLOR
-                                },
-                                Stroke::new(0.25, Color32::from_gray(90)),
-                                StrokeKind::Inside,
-                            );
+                        Mode::Editing { cursor_mode, .. } => {
+                            match cursor_mode {
+                                CursorMode::Caret(caret) => {
+                                    painter.rect(
+                                        recter(caret.location, self.scene_offset),
+                                        0.0,
+                                        if caret.string_mode {
+                                            Color32::LIGHT_GREEN
+                                        } else {
+                                            CURSOR_COLOR
+                                        },
+                                        Stroke::new(0.25, Color32::from_gray(90)),
+                                        StrokeKind::Inside,
+                                    );
 
-                            let mut cursor_copy = *cursor_state;
-                            cursor_copy.step(&self.settings);
+                                    let mut cursor_copy = *caret;
+                                    cursor_copy.step(&self.settings);
 
-                            painter.rect(
-                                recter(cursor_copy.location, self.scene_offset),
-                                0.0,
-                                if cursor_state.string_mode {
-                                    Color32::LIGHT_GREEN
-                                } else {
-                                    CURSOR_COLOR
+                                    painter.rect(
+                                        recter(cursor_copy.location, self.scene_offset),
+                                        0.0,
+                                        if caret.string_mode {
+                                            Color32::LIGHT_GREEN
+                                        } else {
+                                            CURSOR_COLOR
+                                        }
+                                        .gamma_multiply_u8(80),
+                                        Stroke::NONE,
+                                        StrokeKind::Inside,
+                                    );
                                 }
-                                .gamma_multiply_u8(80),
-                                Stroke::NONE,
-                                StrokeKind::Inside,
-                            );
+                                CursorMode::Span(CursorSpan::Partial(pos)) => {
+                                    let rect_a = recter(*pos, self.scene_offset);
+                                    let rect_b = recter(self.cursor_pos, self.scene_offset);
+                                    let rect = rect_a.union(rect_b);
+
+                                    ui.painter().rect(rect, 0.0, CURSOR_COLOR.gamma_multiply(0.3), Stroke::NONE, StrokeKind::Inside);
+
+                                    ui.painter().add(Shape::dashed_line(
+                                        &[
+                                            rect.left_top(),
+                                            rect.right_top(),
+                                            rect.right_bottom(),
+                                            rect.left_bottom(),
+                                            rect.left_top(),
+                                        ],
+                                        Stroke::new(0.75, CURSOR_COLOR),
+                                        1.0,
+                                        1.0,
+                                    ));
+                                }
+                                // Full selection dealt with lower down
+                                _ => ()
+                            }
                         }
                     };
                 }
@@ -1910,9 +2167,53 @@ impl App {
                         for y in integer_clip_rect.0.1..=integer_clip_rect.1.1 {
                             let pos = recter((x, y), self.scene_offset);
                             let val = match &mut self.mode {
-                        Mode::Playing { bf_state, .. } => bf_state.get((x, y)),
-                        Mode::Editing { fungespace, .. } => fungespace.get((x, y)),
-                    };
+                                Mode::Playing { bf_state, .. } => bf_state.get((x, y)),
+                                Mode::Editing { fungespace, .. } => fungespace.get((x, y)),
+                            };
+                            if val != b' ' as i64
+                            {
+                                App::draw_char(
+                                    ui,
+                                    &self.char_renderer,
+                                    &mut mesh,
+                                    &self.settings,
+                                    pos,
+                                    val,
+                                );
+                            }
+                        }
+                    }
+
+                    ui.painter().add(egui::Shape::Mesh(mesh.into()));
+                }
+
+                if let Mode::Editing{cursor_mode, ..} = &mut self.mode && let CursorMode::Span(CursorSpan::Full{start,end,data,original_start}) = cursor_mode {
+                    let rect_a = recter(*start, self.scene_offset);
+                    let rect_b = recter(*end, self.scene_offset);
+                    let rect = rect_a.union(rect_b);
+
+                    ui.painter().rect(rect, 0.0, ui.visuals().window_fill, Stroke::NONE, StrokeKind::Inside);
+                    ui.painter().rect(rect, 0.0, CURSOR_COLOR.gamma_multiply(0.3), Stroke::NONE, StrokeKind::Inside);
+
+                    ui.painter().add(Shape::dashed_line(
+                        &[
+                            rect.left_top(),
+                            rect.right_top(),
+                            rect.right_bottom(),
+                            rect.left_bottom(),
+                            rect.left_top(),
+                        ],
+                        Stroke::new(0.75, CURSOR_COLOR),
+                        1.0,
+                        1.0,
+                    ));
+
+                    let mut mesh = egui::Mesh::with_texture(egui::TextureId::default());
+
+                    for y in 0..=end.1-start.1 {
+                        for x in 0..=end.0-start.0 {
+                            let pos = recter((x+start.0, y+start.1), self.scene_offset);
+                            let val = data[(x + y*(end.0-start.0+1)) as usize];
                             if val != b' ' as i64
                             {
                                 App::draw_char(
@@ -2030,11 +2331,10 @@ impl App {
                                     |val| {
                                         // if previous undo was just setting this exact value,
                                         // don't update the undolist
-                                        if !matches!(undos.last(), Some((prev, true)) if prev.len() == 1 && prev[0].0 == popup_pos) {
-                                            undos.push((
-                                                vec![(popup_pos, chr)].into(),
-                                                true,
-                                            ));
+                                        if !matches!(undos.last(), Some(Undo::Dedupable(prev_pos, _)) if *prev_pos == popup_pos) {
+                                            undos.push(
+                                                Undo::Dedupable(popup_pos, chr),
+                                            );
                                         }
                                         redos.clear();
                                         fungespace.set(popup_pos, val)
@@ -2085,14 +2385,14 @@ impl App {
             })
             .response;
 
-        if response.contains_pointer()
-            && let Some(pos) = response.hover_pos()
+        if scene_response.contains_pointer()
+            && let Some(pos) = scene_response.hover_pos()
         {
             let pos = poss_reverse(pos, self.scene_offset);
             let border_pos = self.settings.befunge_version.border_positions();
             if intersects(border_pos, pos) {
                 if self.cursor_pos == pos && self.settings.display_befunge_tooltips {
-                    if should_show_tooltip(&response, self.befunge_tooltip_open) {
+                    if should_show_tooltip(&scene_response, self.befunge_tooltip_open) {
                         self.befunge_tooltip_open = true;
                         ui.request_repaint()
                     }
@@ -2105,23 +2405,135 @@ impl App {
             }
         };
 
-        if response.clicked()
-            && let Some(pos) = response.interact_pointer_pos()
+        if let Mode::Editing {
+            cursor_mode,
+            fungespace,
+            undos,
+            redos,
+            ..
+        } = &mut self.mode
         {
-            let pos = poss_reverse(pos, self.scene_offset);
-            match &mut self.mode {
-                Mode::Playing { .. } => (),
-                Mode::Editing { cursor_state, .. } => {
+            if ui.input(|i| i.modifiers.alt)
+                || matches!(cursor_mode, CursorMode::Span(CursorSpan::Partial(_)))
+            {
+                let overlay_response = {
+                    let mut response = None;
+                    ui.with_layer_id(
+                        egui::LayerId::new(
+                            egui::Order::Foreground,
+                            ui.id().with("span_drag_overlay"),
+                        ),
+                        |ui| {
+                            //ui.painter().rect_filled(available_rect, 0.0, Color32::ORANGE.gamma_multiply(0.1));
+                            response = Some(ui.interact(
+                                available_rect,
+                                ui.id().with("span_drag_overlay"),
+                                egui::Sense::drag(),
+                            ));
+                        },
+                    );
+                    response.unwrap()
+                };
+
+                // sure hope this is safe to unwrap...
+                let transform = ui
+                    .layer_transform_from_global(scene_response.layer_id)
+                    .unwrap();
+
+                if overlay_response.contains_pointer()
+                    && let Some(pos) = overlay_response.hover_pos()
+                {
+                    let pos = transform.mul_pos(pos);
+                    let pos = poss_reverse(pos, self.scene_offset);
                     let border_pos = self.settings.befunge_version.border_positions();
                     if intersects(border_pos, pos) {
-                        cursor_state.location = pos;
+                        if self.cursor_pos == pos && self.settings.display_befunge_tooltips {
+                            if should_show_tooltip(&overlay_response, self.befunge_tooltip_open) {
+                                self.befunge_tooltip_open = true;
+                                ui.request_repaint()
+                            }
+                        } else {
+                            self.befunge_tooltip_open = false;
+                        }
+                        self.cursor_pos = pos;
+                    } else {
+                        self.befunge_tooltip_open = false;
+                    }
+                };
+
+                if overlay_response.drag_started()
+                    && let Some(pos) = overlay_response.interact_pointer_pos()
+                {
+                    let pos = transform.mul_pos(pos);
+                    let pos = poss_reverse(pos, self.scene_offset);
+                    let border_pos = self.settings.befunge_version.border_positions();
+                    if intersects(border_pos, pos) {
+                        Mode::set_cursor(
+                            cursor_mode,
+                            fungespace,
+                            undos,
+                            redos,
+                            CursorMode::Span(CursorSpan::Partial(pos)),
+                        );
                     }
                 }
-            }
-        };
 
-        if response.secondary_clicked()
-            && let Some(pos) = response.interact_pointer_pos()
+                if overlay_response.drag_stopped()
+                    && let CursorMode::Span(CursorSpan::Partial(pos)) = cursor_mode
+                {
+                    let pos2 = self.cursor_pos;
+                    let (start, end) = (
+                        (pos.0.min(pos2.0), pos.1.min(pos2.1)),
+                        (pos.0.max(pos2.0), pos.1.max(pos2.1)),
+                    );
+
+                    let mut data = vec![];
+                    for y in start.1..=end.1 {
+                        for x in start.0..=end.0 {
+                            data.push(fungespace.get((x, y)));
+                            fungespace.set((x, y), b' ' as i64);
+                        }
+                    }
+                    Mode::set_cursor(
+                        cursor_mode,
+                        fungespace,
+                        undos,
+                        redos,
+                        CursorMode::Span(CursorSpan::Full {
+                            start,
+                            end,
+                            data,
+                            original_start: start,
+                        }),
+                    );
+                };
+            }
+
+            if scene_response.clicked()
+                && let Some(pos) = scene_response.interact_pointer_pos()
+            {
+                let pos = poss_reverse(pos, self.scene_offset);
+
+                let border_pos = self.settings.befunge_version.border_positions();
+                if intersects(border_pos, pos) {
+                    match cursor_mode {
+                        CursorMode::Caret(caret) => caret.location = pos,
+                        CursorMode::Span(_) => {
+                            Mode::set_cursor(
+                                cursor_mode,
+                                fungespace,
+                                undos,
+                                redos,
+                                CursorMode::caret(pos),
+                            );
+                        }
+                    }
+                }
+            };
+        }
+
+        if scene_response.secondary_clicked()
+            && let Some(pos) = scene_response.interact_pointer_pos()
         {
             let pos = poss_reverse(pos, self.scene_offset);
             if pos.0 >= 0 && pos.1 >= 0 {
@@ -2148,7 +2560,7 @@ impl App {
                     self.mode = Mode::Editing {
                         undos: Vec::new(),
                         redos: Vec::new(),
-                        cursor_state: CursorState::default(),
+                        cursor_mode: CursorMode::default(),
                         fungespace: FungeSpace::default(),
                         stdin: String::new(),
                     }
@@ -3074,6 +3486,12 @@ fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
         );
         ui.label(".");
     });
+}
+
+fn display_coordinate(ui: &mut Ui, pos: (i64, i64)) {
+    ui.add(egui::Label::new(
+        RichText::new(format!("({:03}, {:03})", pos.0, pos.1)).text_style(TextStyle::Monospace),
+    ));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
